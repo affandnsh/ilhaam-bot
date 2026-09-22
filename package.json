@@ -1,0 +1,8 @@
+{
+  "name": "ilhaam-bot",
+  "version": "1.0.0",
+  "dependencies": {
+    "@google/generative-ai": "^0.1.1",
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}
