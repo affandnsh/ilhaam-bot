@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(
@@ -6,175 +6,701 @@ const supabase = createClient(
   process.env.SUPABASE_SECRET_KEY
 );
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY
+});
 
 export default async function handler(req, res) {
-  // 1. Meta Webhook Verification Handshake
+
+  // =========================================================
+  // ENVIRONMENT CHECK
+  // =========================================================
+
+  const requiredEnv = [
+    "SUPABASE_URL",
+    "SUPABASE_SECRET_KEY",
+    "GEMINI_API_KEY",
+    "VERIFY_TOKEN",
+    "WHATSAPP_PHONE_ID",
+    "WHATSAPP_ACCESS_TOKEN"
+  ];
+
+  const missingEnv = requiredEnv.filter(
+    (key) => !process.env[key]
+  );
+
+  if (missingEnv.length > 0) {
+    console.error("MISSING ENVIRONMENT VARIABLES:", missingEnv);
+
+    if (req.method === "GET") {
+      return res.status(500).send(
+        `Missing environment variables: ${missingEnv.join(", ")}`
+      );
+    }
+
+    return res.status(500).send("Server configuration error");
+  }
+
+
+  // =========================================================
+  // META WEBHOOK VERIFICATION
+  // =========================================================
+
   if (req.method === "GET") {
+
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
     const challenge = req.query["hub.challenge"];
-    if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
+
+    if (
+      mode === "subscribe" &&
+      token === process.env.VERIFY_TOKEN
+    ) {
+      console.log("META WEBHOOK VERIFIED");
+
       return res.status(200).send(challenge);
     }
+
+    console.error("META WEBHOOK VERIFICATION FAILED");
+
     return res.status(403).send("Forbidden");
   }
 
-  // 2. Inbound WhatsApp Message
-  if (req.method === "POST") {
-    try {
-      const entry = req.body?.entry?.[0]?.changes?.[0]?.value;
-      const message = entry?.messages?.[0];
 
-      if (!message || message.type !== "text") {
+  // =========================================================
+  // WHATSAPP MESSAGE
+  // =========================================================
+
+  if (req.method === "POST") {
+
+    try {
+
+      console.log("WHATSAPP WEBHOOK RECEIVED");
+
+      const entry = req.body?.entry?.[0];
+      const change = entry?.changes?.[0];
+      const value = change?.value;
+      const message = value?.messages?.[0];
+
+      // Ignore status updates and other webhook events
+      if (!message) {
+        console.log("No WhatsApp message found. Ignoring event.");
+
         return res.status(200).send("OK");
       }
 
-      const fromPhone = String(message.from).replace(/\D/g, "");
-      const incomingText = message.text.body.trim();
+      // We currently process text messages only
+      if (message.type !== "text") {
 
-      // Ensure customer exists in database
-      const { data: customer } = await supabase
+        console.log(
+          "Ignoring non-text message:",
+          message.type
+        );
+
+        return res.status(200).send("OK");
+      }
+
+
+      // =====================================================
+      // CUSTOMER MESSAGE
+      // =====================================================
+
+      const fromPhone = String(message.from).replace(/\D/g, "");
+
+      const incomingText =
+        message.text?.body?.trim() || "";
+
+      console.log("CUSTOMER PHONE:", fromPhone);
+      console.log("CUSTOMER MESSAGE:", incomingText);
+
+
+      // =====================================================
+      // CUSTOMER DATABASE
+      // =====================================================
+
+      let customer = null;
+
+      const {
+        data: customerData,
+        error: customerError
+      } = await supabase
         .from("customers")
         .upsert(
-          { whatsapp_number: fromPhone, name: "WhatsApp Guest", last_order_at: new Date().toISOString() },
-          { onConflict: "whatsapp_number" }
+          {
+            whatsapp_number: fromPhone,
+            name: "WhatsApp Guest"
+          },
+          {
+            onConflict: "whatsapp_number"
+          }
         )
         .select()
         .single();
 
-      // Fetch live menu from Supabase
-      const { data: menuList } = await supabase
+      if (customerError) {
+
+        console.error(
+          "CUSTOMER DATABASE ERROR:",
+          customerError
+        );
+
+      } else {
+
+        customer = customerData;
+
+        console.log(
+          "CUSTOMER FOUND:",
+          customer.id
+        );
+      }
+
+
+      // =====================================================
+      // LIVE MENU FROM SUPABASE
+      // =====================================================
+
+      const {
+        data: menuList,
+        error: menuError
+      } = await supabase
         .from("menu_items")
-        .select("name, category, price, is_veg, is_available");
+        .select(
+          "name, category, price, is_veg, is_available"
+        )
+        .eq("is_available", true);
 
-      const menuKnowledge = menuList && menuList.length > 0
-        ? menuList.map(item => `- ${item.name} (${item.category}): ₹${item.price} [${item.is_veg ? "Veg" : "Non-Veg"}]`).join("\n")
-        : `- Fish Fingers: ₹370\n- Chilli Chicken: ₹250\n- Drums of Heaven: ₹250\n- Kolkata Chicken Biryani: ₹320\n- Royal Mutton Biryani: ₹390\n- Reshmi Kebab: ₹320\n- Butter Naan: ₹60`;
+      if (menuError) {
 
-      // Master Intelligent Prompt
-      const fullPrompt = `You are the authentic, knowledgeable AI Concierge for "Ilhaam Royal Dining", a luxury fine-dining restaurant in Park Circus, Kolkata (+91 744 998 8873).
-Menu Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
+        console.error(
+          "MENU DATABASE ERROR:",
+          menuError
+        );
+      }
 
-OFFICIAL MENU RETRIEVED FROM DATABASE:
+
+      let menuKnowledge = "";
+
+      if (
+        menuList &&
+        menuList.length > 0
+      ) {
+
+        menuKnowledge = menuList
+          .map(
+            (item) =>
+              `- ${item.name} | Category: ${item.category} | Price: ₹${item.price} | ${item.is_veg ? "Veg" : "Non-Veg"}`
+          )
+          .join("\n");
+
+      } else {
+
+        console.log(
+          "No menu found in Supabase. Using emergency fallback menu."
+        );
+
+        menuKnowledge = `
+- Fish Fingers | Starters | ₹370 | Non-Veg
+- Chilli Chicken | Starters | ₹250 | Non-Veg
+- Drums of Heaven | Starters | ₹250 | Non-Veg
+- Kolkata Chicken Biryani | Main Course | ₹320 | Non-Veg
+- Royal Mutton Biryani | Main Course | ₹390 | Non-Veg
+- Reshmi Kebab | Kebab | ₹320 | Non-Veg
+- Butter Naan | Indian Bread | ₹60 | Veg
+`;
+      }
+
+
+      // =====================================================
+      // GEMINI PROMPT
+      // =====================================================
+
+      const fullPrompt = `
+You are the official AI Concierge for:
+
+ILHAAM ROYAL DINING
+
+Location:
+Park Circus, Kolkata
+
+Phone:
++91 744 998 8873
+
+You are speaking to customers through WhatsApp.
+
+Your job is to help customers with:
+1. Menu questions
+2. Food questions
+3. Ordering
+4. Takeaway
+5. Delivery enquiries
+6. Dine-in enquiries
+7. Table reservations
+
+Be warm, concise and professional.
+
+Do NOT repeatedly send the generic welcome message.
+
+If the customer says hello, greet them and briefly explain that they can:
+- View the menu
+- Ask about dishes
+- Place an order
+- Reserve a table
+
+=========================================================
+LIVE RESTAURANT MENU FROM SUPABASE
+=========================================================
+
 ${menuKnowledge}
 
-CULINARY KNOWLEDGE & POLICIES:
-- Boneless questions: Reshmi Kebab, Chicken Tikka, and Chilli Chicken are boneless. Biryanis and Drums of Heaven are bone-in.
-- Hookah & Alcohol: Strictly prohibited. We are a family fine-dining restaurant and do NOT serve hookah.
-- Mutton Kebabs: Not on the regular daily menu (we serve Royal Mutton Biryani; mutton kebabs are chef specials on tasting nights).
-- If customer asks for menu: share an elegant summary across sections with the Google Drive menu link.
+=========================================================
+RESTAURANT KNOWLEDGE
+=========================================================
 
-WORKFLOW RULES:
-1. Answering Questions: Answer any culinary, timing, or ingredient question warmly and intelligently.
-2. Ordering:
-   - When a customer wants to order: clarify dishes and quantities, calculate the total amount from the menu, and summarize: "You've selected [Items] for ₹[Total]. Shall I confirm this order? (Reply YES to confirm)". DO NOT finalize yet.
-   - When they confirm (YES / CONFIRM / PROCEED):
-     * If DINE-IN (mentioning table, e.g. Table 4): append at the very end:
-       ORDER_DATA:{"table":"4","type":"dine_in","total":480}
-     * If TAKEAWAY/DELIVERY: append at the very end:
-       ORDER_DATA:{"table":"takeaway","type":"takeaway","total":480}
-3. Reservations:
-   - Ask for party size and preferred time. When confirmed, append at the end:
-     RESERVATION_DATA:{"party_size":2,"time":"Evening"}
+- Reshmi Kebab is boneless.
+- Chicken Tikka is boneless.
+- Chilli Chicken is boneless.
+- Biryanis are bone-in unless the menu/database specifically says otherwise.
+- Drums of Heaven are bone-in.
+- Hookah is NOT available.
+- Alcohol is NOT served.
+- Mutton kebabs are not part of the regular daily menu.
+- Royal Mutton Biryani is available if listed in the live menu.
+- Never invent dishes or prices.
+- Always use the LIVE MENU above for prices.
+- If a dish is not present in the menu, say that you cannot currently find it on the available menu.
 
-CUSTOMER PHONE: ${fromPhone}
-CUSTOMER MESSAGE: "${incomingText}"
+=========================================================
+MENU REQUEST
+=========================================================
 
-Response:`;
+If the customer asks for the menu, give a short organized summary using the available menu.
+
+Menu:
+https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
+
+=========================================================
+ORDERING
+=========================================================
+
+If the customer wants to order:
+
+1. Identify the dishes.
+2. Identify quantities.
+3. Use the LIVE MENU prices.
+4. Calculate the total.
+5. Ask for confirmation.
+
+Example:
+
+"You've selected:
+2 × Chicken Biryani — ₹640
+1 × Butter Naan — ₹60
+
+Total: ₹700
+
+Shall I confirm this order?
+Reply YES to confirm."
+
+DO NOT create an order until the customer clearly confirms.
+
+=========================================================
+ORDER CONFIRMATION
+=========================================================
+
+If the customer clearly confirms an order using words such as:
+
+YES
+CONFIRM
+CONFIRMED
+PROCEED
+PLACE ORDER
+
+then append this exact machine-readable line at the END:
+
+ORDER_DATA:{"type":"takeaway","total":700}
+
+Replace 700 with the ACTUAL total.
+
+If the customer explicitly gives a dine-in table number, use:
+
+ORDER_DATA:{"type":"dine_in","table":"4","total":700}
+
+Never invent a table number.
+
+=========================================================
+TABLE RESERVATION
+=========================================================
+
+If the customer wants to reserve a table:
+
+Ask for:
+- Number of guests
+- Preferred time
+
+Once the customer has provided both and is clearly asking to make the reservation, append:
+
+RESERVATION_DATA:{"party_size":2,"time":"8:00 PM"}
+
+Use the actual party size and time.
+
+=========================================================
+IMPORTANT
+=========================================================
+
+Never invent prices.
+
+Never invent menu items.
+
+Never claim an order is confirmed before the customer explicitly confirms.
+
+Never claim a reservation is confirmed by the restaurant.
+
+The system will handle database storage after you provide the machine-readable data.
+
+=========================================================
+CUSTOMER PHONE
+=========================================================
+
+${fromPhone}
+
+=========================================================
+CUSTOMER MESSAGE
+=========================================================
+
+${incomingText}
+
+=========================================================
+YOUR RESPONSE
+=========================================================
+`;
+
+
+      // =====================================================
+      // GEMINI
+      // =====================================================
 
       let replyText = "";
 
-      // Call Gemini Flash with clean text payload
       try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const result = await model.generateContent(fullPrompt);
-        replyText = result.response.text();
-      } catch (gemErr) {
-        console.error("Gemini 1.5 Flash error, attempting fallback:", gemErr?.message);
-        try {
-          const fallbackModel = genAI.getGenerativeModel({ model: "gemini-pro" });
-          const fbResult = await fallbackModel.generateContent(fullPrompt);
-          replyText = fbResult.response.text();
-        } catch (fbErr) {
-          console.error("Gemini Pro fallback error:", fbErr?.message);
-        }
+
+        console.log("CALLING GEMINI...");
+
+        const result =
+          await ai.models.generateContent({
+            model: "gemini-3.8-flash",
+            contents: fullPrompt
+          });
+
+        replyText =
+          result.text?.trim() || "";
+
+        console.log(
+          "GEMINI RESPONSE:",
+          replyText
+        );
+
+      } catch (geminiError) {
+
+        console.error(
+          "GEMINI ERROR:",
+          geminiError
+        );
+
+        replyText =
+          "Sorry, our dining assistant is temporarily unavailable. Please try again in a moment.";
       }
+
+
+      // =====================================================
+      // ORDER PROCESSING
+      // =====================================================
+
+      if (
+        replyText.includes("ORDER_DATA:")
+      ) {
+
+        const parts =
+          replyText.split("ORDER_DATA:");
+
+        const customerReply =
+          parts[0].trim();
+
+        let orderData = null;
+
+        try {
+
+          orderData =
+            JSON.parse(parts[1].trim());
+
+        } catch (parseError) {
+
+          console.error(
+            "ORDER DATA PARSE ERROR:",
+            parseError
+          );
+        }
+
+        if (
+          orderData &&
+          customer
+        ) {
+
+          const orderNumber =
+            `ORD-${Date.now()
+              .toString()
+              .slice(-6)}`;
+
+          const total =
+            Number(orderData.total) || 0;
+
+          const orderType =
+            orderData.type === "dine_in"
+              ? "dine_in"
+              : "takeaway";
+
+          const {
+            error: orderError
+          } = await supabase
+            .from("orders")
+            .insert({
+
+              order_number:
+                orderNumber,
+
+              customer_id:
+                customer.id,
+
+              total:
+                total,
+
+              subtotal:
+                total,
+
+              status:
+                "new",
+
+              payment_status:
+                "pending",
+
+              order_type:
+                orderType
+            });
+
+          if (orderError) {
+
+            console.error(
+              "ORDER DATABASE ERROR:",
+              orderError
+            );
+
+          } else {
+
+            console.log(
+              "ORDER CREATED:",
+              orderNumber
+            );
+
+            if (
+              orderType === "dine_in"
+            ) {
+
+              customerReply +=
+                `\n\n✅ *Dine-In Ticket Created:* *${orderNumber}*\nTable ${orderData.table || "Not specified"}\nPlease show this Order ID to your captain/waiter.`;
+
+            } else {
+
+              customerReply +=
+                `\n\n✅ *Order Received:* *${orderNumber}*\nThank you. Our team will contact you shortly regarding the order.`;
+            }
+          }
+
+        }
+
+        replyText =
+          customerReply;
+      }
+
+
+      // =====================================================
+      // RESERVATION PROCESSING
+      // =====================================================
+
+      if (
+        replyText.includes(
+          "RESERVATION_DATA:"
+        )
+      ) {
+
+        const parts =
+          replyText.split(
+            "RESERVATION_DATA:"
+          );
+
+        const customerReply =
+          parts[0].trim();
+
+        let reservationData = null;
+
+        try {
+
+          reservationData =
+            JSON.parse(parts[1].trim());
+
+        } catch (parseError) {
+
+          console.error(
+            "RESERVATION DATA PARSE ERROR:",
+            parseError
+          );
+        }
+
+        if (
+          reservationData
+        ) {
+
+          const {
+            error: reservationError
+          } = await supabase
+            .from("reservations")
+            .insert({
+
+              customer_phone:
+                fromPhone,
+
+              customer_name:
+                customer?.name ||
+                "WhatsApp Guest",
+
+              party_size:
+                Number(
+                  reservationData.party_size
+                ) || 2,
+
+              booking_time:
+                reservationData.time ||
+                "Evening",
+
+              status:
+                "pending"
+            });
+
+          if (reservationError) {
+
+            console.error(
+              "RESERVATION DATABASE ERROR:",
+              reservationError
+            );
+
+          } else {
+
+            console.log(
+              "RESERVATION CREATED"
+            );
+
+            customerReply +=
+              `\n\n✅ *Table Request Logged!*\nThank you for choosing Ilhaam Royal Dining. Our team will contact you to confirm the reservation.`;
+          }
+        }
+
+        replyText =
+          customerReply;
+      }
+
+
+      // =====================================================
+      // FINAL SAFETY
+      // =====================================================
 
       if (!replyText) {
-        replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You may view our menu, place an order, or reserve a table.";
+
+        console.error(
+          "EMPTY GEMINI RESPONSE"
+        );
+
+        replyText =
+          "Sorry, I couldn't process that request. Please try again.";
       }
 
-      // Handle Confirmed Orders into Database
-      if (replyText.includes("ORDER_DATA:")) {
-        const parts = replyText.split("ORDER_DATA:");
-        replyText = parts[0].trim();
-        let payload = { total: 480, table: "takeaway", type: "takeaway" };
-        try { payload = JSON.parse(parts[1].trim()); } catch (e) {}
 
-        const orderNum = `ORD-${Date.now().toString().slice(-4)}`;
+      // =====================================================
+      // SEND WHATSAPP MESSAGE
+      // =====================================================
 
-        if (customer?.id) {
-          await supabase.from("orders").insert({
-            order_number: orderNum,
-            customer_id: customer.id,
-            total: payload.total || 480,
-            subtotal: payload.total || 480,
-            status: "new",
-            payment_status: "pending",
-            order_type: payload.type || "takeaway"
-          });
-        }
-
-        if (payload.type === "dine_in") {
-          replyText += `\n\n✅ *Dine-In Ticket Created:* *${orderNum}* (Table ${payload.table})\nPlease show this Order ID to your captain/waiter.`;
-        } else {
-          replyText += `\n\n✅ *Ticket Created:* *${orderNum}*\nThank you for ordering with us, you'll receive a confirmation call soon.`;
-        }
-      }
-
-      // Handle Confirmed Reservations into Database
-      if (replyText.includes("RESERVATION_DATA:")) {
-        const parts = replyText.split("RESERVATION_DATA:");
-        replyText = parts[0].trim();
-        let resPayload = { party_size: 2, time: "Evening" };
-        try { resPayload = JSON.parse(parts[1].trim()); } catch (e) {}
-
-        await supabase.from("reservations").insert({
-          customer_phone: fromPhone,
-          customer_name: "WhatsApp Guest",
-          party_size: resPayload.party_size || 2,
-          booking_time: resPayload.time || "Evening",
-          status: "pending"
-        });
-
-        replyText += `\n\n✅ *Table Request Logged!*\nThank you for choosing Ilhaam Royal Dining, you'll receive a confirmation call soon.`;
-      }
-
-      // Send Response to WhatsApp via Meta API
-      await fetch(
-        `https://graph.facebook.com/v25.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            messaging_product: "whatsapp",
-            to: fromPhone,
-            type: "text",
-            text: { body: replyText }
-          })
-        }
+      console.log(
+        "SENDING WHATSAPP RESPONSE..."
       );
 
-      return res.status(200).send("EVENT_RECEIVED");
-    } catch (err) {
-      console.error("Critical webhook error:", err);
-      return res.status(200).send("ERROR_HANDLED");
+      const whatsappResponse =
+        await fetch(
+          `https://graph.facebook.com/v25.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
+          {
+            method: "POST",
+
+            headers: {
+              Authorization:
+                `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+
+              "Content-Type":
+                "application/json"
+            },
+
+            body: JSON.stringify({
+
+              messaging_product:
+                "whatsapp",
+
+              to:
+                fromPhone,
+
+              type:
+                "text",
+
+              text: {
+                body:
+                  replyText
+              }
+            })
+          }
+        );
+
+
+      const whatsappResult =
+        await whatsappResponse.text();
+
+      console.log(
+        "WHATSAPP API STATUS:",
+        whatsappResponse.status
+      );
+
+      console.log(
+        "WHATSAPP API RESPONSE:",
+        whatsappResult
+      );
+
+
+      // =====================================================
+      // FINISH
+      // =====================================================
+
+      return res
+        .status(200)
+        .send("EVENT_RECEIVED");
+
+    } catch (error) {
+
+      console.error(
+        "CRITICAL WEBHOOK ERROR:",
+        error
+      );
+
+      return res
+        .status(200)
+        .send("ERROR_HANDLED");
     }
   }
 
-  return res.status(405).send("Method Not Allowed");
+
+  return res
+    .status(405)
+    .send("Method Not Allowed");
 }
