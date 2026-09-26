@@ -6,6 +6,7 @@ const supabase = createClient(
 );
 
 export default async function handler(req, res) {
+  // 1. Meta Webhook Verification Handshake
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -16,6 +17,7 @@ export default async function handler(req, res) {
     return res.status(403).send("Forbidden");
   }
 
+  // 2. Incoming WhatsApp Webhook Event
   if (req.method === "POST") {
     try {
       const entry = req.body?.entry?.[0]?.changes?.[0]?.value;
@@ -26,54 +28,57 @@ export default async function handler(req, res) {
       }
 
       const fromPhone = String(message.from).replace(/\D/g, "");
-      const incomingText = message.text.body;
+      const incomingText = message.text.body.trim();
+      const lowerText = incomingText.toLowerCase();
 
       let replyText = "";
 
-      // 1. Call Gemini via standard REST
+      // Try Gemini 1.5 Flash REST API
       try {
         const prompt = `You are the AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
 Menu: Chicken Biryani (320), Special Chicken Biryani (500), Mutton Biryani (390), Butter Naan (60), Chicken Tikka (320).
-User said: "${incomingText}"
+User message: "${incomingText}"
 
 Instructions:
-- If they want to order: ask what they'd like, or confirm their items and address.
-- If they want to book a table: ask for party size and preferred time.
-- If they just greet: greet warmly and offer Menu, Order, or Booking.
-- Keep the response short, warm, and conversational.
-- When an order is clearly requested/confirmed, include at the very end:
-ORDER_DATA:{"total":320}
-- When a reservation is requested, include at the very end:
-RESERVATION_DATA:{"party_size":2,"time":"Tonight"}`;
+- If customer asks for menu or options: provide clear menu items with prices.
+- If customer wants to order: acknowledge the order politely, confirm items, and append ORDER_DATA:{"total":320}
+- If customer wants to book a table or reserve: confirm table booking and append RESERVATION_DATA:{"party_size":2}
+- Keep replies courteous, concise, and helpful.`;
 
         const geminiRes = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }]
-            })
+            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
           }
         );
-        const geminiData = await geminiRes.json();
-        replyText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
-      } catch (e) {
-        console.error("AI error:", e);
+        const data = await geminiRes.json();
+        replyText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      } catch (err) {
+        console.error("Gemini primary call error:", err);
       }
 
+      // Robust Conversational Fallback Engine
       if (!replyText) {
-        replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️\nHow can we serve you today?\n\n1. Place an Order\n2. Book a Table\n3. View Menu";
+        if (lowerText.includes("menu") || lowerText === "3" || lowerText.includes("view")) {
+          replyText = "📜 *Ilhaam Royal Dining Menu*:\n\n• Chicken Biryani: ₹320\n• Special Chicken Biryani: ₹500\n• Mutton Biryani: ₹390\n• Special Mutton Biryani: ₹550\n• Chicken Tikka: ₹320\n• Butter Naan: ₹60\n\nTo order, reply with the items you'd like (e.g. *1 Chicken Biryani and 1 Butter Naan*).";
+        } else if (lowerText.includes("book") || lowerText.includes("table") || lowerText === "2" || lowerText.includes("reservation")) {
+          replyText = "🍽️ *Table Reservation Request Received!*\n\nPlease share your *Party Size* and *Preferred Time* (e.g., *Table for 4 at 8:30 PM*).\n\nRESERVATION_DATA:{\"party_size\":2}";
+        } else if (lowerText.includes("order") || lowerText.includes("biryani") || lowerText === "1" || lowerText.includes("naan")) {
+          replyText = "🍛 *Order Registered!*\nWe are preparing your items for delivery/takeaway.\n\nORDER_DATA:{\"total\":380}";
+        } else {
+          replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️\nHow may we serve you today?\n\n1. Place an Order\n2. Book a Table\n3. View Menu\n\nCall Us: +91 744 998 8873";
+        }
       }
 
-      // 2. Handle Order Insertion into Supabase
+      // 3. Supabase Integration: Insert Orders
       if (replyText.includes("ORDER_DATA:")) {
         const parts = replyText.split("ORDER_DATA:");
         replyText = parts[0].trim();
         const orderNum = `ORD-${Date.now().toString().slice(-4)}`;
 
         try {
-          // Upsert customer
           const { data: cust } = await supabase
             .from("customers")
             .upsert({ whatsapp_number: fromPhone, name: "WhatsApp Guest" }, { onConflict: "whatsapp_number" })
@@ -84,20 +89,20 @@ RESERVATION_DATA:{"party_size":2,"time":"Tonight"}`;
             await supabase.from("orders").insert({
               order_number: orderNum,
               customer_id: cust.id,
-              total: 320,
-              subtotal: 320,
+              total: 380,
+              subtotal: 380,
               status: "new",
               payment_status: "pending"
             });
           }
         } catch (dbErr) {
-          console.error("Order DB write error:", dbErr);
+          console.error("Order Supabase write error:", dbErr);
         }
 
-        replyText += `\n\n✅ *Order Confirmed!* Ticket: *${orderNum}*.`;
+        replyText += `\n\n✅ *Ticket Created:* *${orderNum}*. The kitchen has received your ticket!`;
       }
 
-      // 3. Handle Reservation Insertion into Supabase
+      // 4. Supabase Integration: Insert Table Reservations
       if (replyText.includes("RESERVATION_DATA:")) {
         const parts = replyText.split("RESERVATION_DATA:");
         replyText = parts[0].trim();
@@ -111,13 +116,13 @@ RESERVATION_DATA:{"party_size":2,"time":"Tonight"}`;
             status: "pending"
           });
         } catch (resErr) {
-          console.error("Reservation DB write error:", resErr);
+          console.error("Reservation Supabase write error:", resErr);
         }
 
-        replyText += `\n\n✅ *Table Request Logged!* Our team is reserving your spot.`;
+        replyText += `\n\n✅ *Table Logged:* Our reservation desk will confirm your spot shortly.`;
       }
 
-      // 4. Send Message back to Customer
+      // 5. Send Formatted Message back to Customer via Meta Graph API
       await fetch(
         `https://graph.facebook.com/v25.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
         {
@@ -137,7 +142,7 @@ RESERVATION_DATA:{"party_size":2,"time":"Tonight"}`;
 
       return res.status(200).send("EVENT_RECEIVED");
     } catch (err) {
-      console.error("Handler error:", err);
+      console.error("Webhook processing error:", err);
       return res.status(200).send("ERROR_HANDLED");
     }
   }
