@@ -42,14 +42,25 @@ Menu:
 - Starters: Chilli Chicken (250), Drums of Heaven (250), Fish Finger (370), Crispy Chilli Babycorn (210)
 - Tandoor: Chicken Tikka (320), Reshmi Kebab (320), Cheese Kebab (440)
 - Breads: Butter Naan (60), Garlic Cheese Naan (100), Tandoori Roti (20)
-// Order handling
+
+Rules:
+1. Greet warmly and answer menu/timing queries.
+2. If customer wants to order: collect their name, address, and items.
+3. Once finalized, append this exact block at the very end:
+ORDER_DATA:{"name":"...","address":"...","total":320}`
+      });
+
+      const result = await model.generateContent(incomingText);
+      let replyText = result.response.text();
+
+      // Order handling and database write
       if (replyText.includes("ORDER_DATA:")) {
         const parts = replyText.split("ORDER_DATA:");
         replyText = parts[0].trim();
         const orderNum = `ORD-${Date.now().toString().slice(-4)}`;
         
         try {
-          // 1. Create or find customer first
+          // 1. Create or find customer
           const { data: customer } = await supabase
             .from("customers")
             .upsert({ whatsapp_number: fromPhone, name: "WhatsApp Guest" }, { onConflict: "whatsapp_number" })
@@ -68,7 +79,7 @@ Menu:
             });
           }
         } catch (dbErr) {
-          console.error("Supabase insert ignored to allow reply:", dbErr);
+          console.error("Supabase insert error:", dbErr);
         }
 
         replyText += `\n\n✅ *Order Confirmed!* Ticket: *${orderNum}*.`;
@@ -93,3 +104,13 @@ Menu:
       );
       const metaData = await metaRes.json();
       console.log("Meta Response:", metaData);
+
+      return res.status(200).send("EVENT_RECEIVED");
+    } catch (err) {
+      console.error("Webhook processing error:", err);
+      return res.status(200).send("ERROR_HANDLED");
+    }
+  }
+
+  return res.status(405).send("Method Not Allowed");
+}
