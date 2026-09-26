@@ -34,7 +34,7 @@ export default async function handler(req, res) {
 
       // Gemini Response
       const model = genAI.getGenerativeModel({
-        model: "gemini-1.5-flash-latest",
+        model: "gemini-1.5-flash",
         systemInstruction: `You are the AI concierge for "Ilhaam Royal Dining", Park Circus, Kolkata (+91 744 998 8873).
 Menu: Chicken Biryani (320), Special Chicken Biryani (500), Mutton Biryani (390), Butter Naan (60), Chicken Tikka (320).
 Greet the customer politely and answer menu questions. Keep responses short and friendly.`
