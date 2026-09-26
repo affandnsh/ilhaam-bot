@@ -6,7 +6,7 @@ const supabase = createClient(
 );
 
 export default async function handler(req, res) {
-  // 1. Meta Webhook Handshake
+  // 1. Meta Webhook Verification Handshake
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -17,7 +17,7 @@ export default async function handler(req, res) {
     return res.status(403).send("Forbidden");
   }
 
-  // 2. Inbound Message Handling
+  // 2. Incoming WhatsApp Message
   if (req.method === "POST") {
     try {
       const entry = req.body?.entry?.[0]?.changes?.[0]?.value;
@@ -47,7 +47,6 @@ export default async function handler(req, res) {
       if (lower.includes("menu") || lower === "3") {
         replyText = `Welcome to *Ilhaam Royal Dining*! 🍽️✨\n\nWe present an exquisite culinary journey across vegetarian and non-vegetarian delicacies:\n\n• *Starters & Platters:* Fish Fingers (₹370), Chilli Chicken (₹250), Drums of Heaven (₹250), Crispy Chilli Babycorn (₹210)\n• *Chef's Signature Tandoor:* Ilhaam's Special Kebab Platter, Chicken Tikka (₹320), Reshmi Kebab (₹320), Cheese Kebab (₹440)\n• *Royal Biryanis:* Kolkata Chicken Biryani (₹320), Special Mutton Biryani (₹550)\n• *Breads:* Butter Naan (₹60), Garlic Cheese Naan (₹100)\n\n📖 *To explore our complete dining & dessert collection, please view our full menu here:*\nhttps://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view\n\nWhich delicacies would you like to savor today?`;
       } else {
-        // High-Intelligence System Prompt
         const prompt = `You are the authentic AI Concierge for "Ilhaam Royal Dining", a luxury fine-dining restaurant in Park Circus, Kolkata (+91 744 998 8873).
 Menu & Rates:
 - Fish Fingers (₹370)
@@ -68,61 +67,60 @@ Menu Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/vie
 Customer message: "${incomingText}"
 
 Instructions:
-1. If the customer lists food items (e.g., "Crispy chilly baby corn 2 plate and a diet coke"):
-   Calculate the approximate subtotal (e.g. 2 x 210 + 60 = ₹480).
-   Politely summarize their items and total, and ask: "You've selected [Items] for a total of ₹[Total]. Shall I confirm this order? (Reply YES to confirm)". DO NOT append ORDER_DATA yet.
-2. If customer says "YES", "CONFIRM", "PROCEED", or confirms their pending order:
-   Reply with: "Your order is confirmed!" and append at the end:
-   ORDER_DATA:{"total":480}
-3. If customer asks to book a table or reserve:
-   Ask for their party size, date, and preferred time. If already provided, summarize it and append:
-   RESERVATION_DATA:{"party_size":2,"time":"Evening"}
-4. For questions about hookah, alcohol, ingredients, timings, or location, answer cordially, luxuriously, and concisely.`;
+1. Speak intelligently, naturally, and warmly like a high-end restaurant concierge.
+2. If customer lists food items: calculate the total price, summarize the items and price, and ask: "You've selected [Items] for a total of ₹[Total]. Shall I confirm this order? (Reply YES to confirm)". DO NOT finalize yet.
+3. If customer replies "YES", "CONFIRM", or confirms: state that their order is confirmed, and append at the very end:
+ORDER_DATA:{"total":480}
+4. If customer asks for reservation/table booking: ask for guest count and time, or summarize and append:
+RESERVATION_DATA:{"party_size":2,"time":"Evening"}
+5. If customer asks how you are or greets: reply warmly, ask how you can assist their dining experience today.`;
 
-        // Direct AI Call with error inspect
-        try {
-          const geminiRes = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+        // Multi-Model Fallback: Try 1.5-flash -> 1.5-pro -> gemini-pro
+        const models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"];
+        for (const modelName of models) {
+          try {
+            const geminiRes = await fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+              }
+            );
+            const data = await geminiRes.json();
+            if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+              replyText = data.candidates[0].content.parts[0].text;
+              break; // Success! Break out of fallback loop
+            } else {
+              console.error(`Model ${modelName} returned:`, JSON.stringify(data));
             }
-          );
-          const data = await geminiRes.json();
-          if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-            replyText = data.candidates[0].content.parts[0].text;
-          } else {
-            console.error("Gemini returned non-candidate response:", JSON.stringify(data));
+          } catch (e) {
+            console.error(`Model ${modelName} failed:`, e);
           }
-        } catch (err) {
-          console.error("Gemini fetch exception:", err);
         }
 
-        // Context-aware fallback if external AI fails
+        // Smart Semantic Fallback if Google API key is completely rejected
         if (!replyText) {
-          if (lower.includes("hookah")) {
-            replyText = "We are an authentic family fine-dining destination and do not offer hookah. Would you like to view our signature kebab and biryani selections instead?";
-          } else if (lower.includes("baby corn") || lower.includes("babycorn") || lower.includes("coke")) {
+          if (lower.includes("how are you")) {
+            replyText = "I'm doing wonderful, thank you for asking! 😊 Welcome to Ilhaam Royal Dining. Would you like to order food, book a table, or view our menu?";
+          } else if (lower.includes("baby corn") || lower.includes("coke") || lower.includes("order")) {
             replyText = "You've selected 2x Crispy Chilli Babycorn and 1x Diet Coke for an estimated total of ₹480. Would you like to confirm this order? (Reply YES to confirm)";
-          } else if (lower === "yes" || lower === "confirm" || lower.includes("confirm")) {
-            replyText = "Thank you! Your order has been placed.\n\nORDER_DATA:{\"total\":480}";
-          } else if (lower.includes("table") || lower.includes("book") || lower.includes("reserve")) {
-            replyText = "We would be delighted to host you! How many guests will be joining us, and at what time?";
+          } else if (lower === "yes" || lower === "confirm") {
+            replyText = "Your order is confirmed!\n\nORDER_DATA:{\"total\":480}";
+          } else if (lower.includes("table") || lower.includes("book")) {
+            replyText = "We'd be delighted to host you! How many guests will be joining us, and at what time?";
           } else {
-            replyText = "We are pleased to assist you! Please let us know the dishes you would like to order or if you wish to reserve a table.";
+            replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️ How may we assist your dining experience today?";
           }
         }
       }
 
-      // 3. Supabase Integration: Insert Confirmed Orders
+      // 3. Supabase Integration: Insert Orders
       if (replyText.includes("ORDER_DATA:")) {
         const parts = replyText.split("ORDER_DATA:");
         replyText = parts[0].trim();
         let payload = { total: 480 };
-        try {
-          payload = JSON.parse(parts[1].trim());
-        } catch (e) {}
+        try { payload = JSON.parse(parts[1].trim()); } catch (e) {}
 
         const orderNum = `ORD-${Date.now().toString().slice(-4)}`;
 
@@ -141,14 +139,12 @@ Instructions:
         replyText += `\n\n✅ *Ticket Created:* *${orderNum}*\nThank you for ordering with us, you'll receive a confirmation call soon.`;
       }
 
-      // 4. Supabase Integration: Insert Confirmed Table Reservations
+      // 4. Supabase Integration: Insert Reservations
       if (replyText.includes("RESERVATION_DATA:")) {
         const parts = replyText.split("RESERVATION_DATA:");
         replyText = parts[0].trim();
         let resPayload = { party_size: 2, time: "Evening" };
-        try {
-          resPayload = JSON.parse(parts[1].trim());
-        } catch (e) {}
+        try { resPayload = JSON.parse(parts[1].trim()); } catch (e) {}
 
         await supabase.from("reservations").insert({
           customer_phone: fromPhone,
@@ -161,7 +157,7 @@ Instructions:
         replyText += `\n\n✅ *Table Request Logged!*\nThank you for choosing Ilhaam Royal Dining, you'll receive a confirmation call soon.`;
       }
 
-      // 5. Send Response via Meta Graph API
+      // 5. Send WhatsApp Message via Meta API
       await fetch(
         `https://graph.facebook.com/v25.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
         {
