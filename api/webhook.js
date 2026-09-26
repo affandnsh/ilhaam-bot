@@ -9,7 +9,7 @@ const supabase = createClient(
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 export default async function handler(req, res) {
-  // 1. Meta Webhook Handshake
+  // 1. Meta Webhook Verification
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -20,7 +20,7 @@ export default async function handler(req, res) {
     return res.status(403).send("Forbidden");
   }
 
-  // 2. Incoming WhatsApp Message
+  // 2. Inbound WhatsApp Message
   if (req.method === "POST") {
     try {
       const entry = req.body?.entry?.[0]?.changes?.[0]?.value;
@@ -33,7 +33,7 @@ export default async function handler(req, res) {
       const fromPhone = String(message.from).replace(/\D/g, "");
       const incomingText = message.text.body.trim();
 
-      // Ensure customer exists in database
+      // Ensure customer exists
       const { data: customer } = await supabase
         .from("customers")
         .upsert(
@@ -43,72 +43,69 @@ export default async function handler(req, res) {
         .select()
         .single();
 
-      // System Prompt acting as the restaurant's live brain
-      const systemPrompt = `You are the authentic, intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
-You have a real mind: answer any questions conversationally, politely, and luxuriously. Never give robotic, repeated answers.
+      // RAG RETRIEVAL: Pull live menu knowledge base from Supabase
+      const { data: menuList } = await supabase
+        .from("menu_items")
+        .select("name, category, price, is_veg, is_available");
 
-OUR COMPLETE CULINARY KNOWLEDGE BASE:
-- Starters: Fish Fingers (₹370), Chilli Chicken (₹250), Drums of Heaven (₹250), Crispy Chilli Babycorn (₹210)
-- Tandoor & Kebabs: Ilhaam's Special Kebab Platter (₹580), Chicken Tikka (₹320), Reshmi Kebab (₹320), Cheese Kebab (₹440).
-  *Note on Mutton Kebabs*: We currently feature our Chef's signature Chicken & Cheese kebabs and royal mutton biryanis; mutton kebabs are prepared on special chef tasting nights.
-- Royal Biryanis: Kolkata Chicken Biryani with egg & potato (₹320), Special Chicken Biryani (₹500), Royal Mutton Biryani (₹390), Special Mutton Biryani (₹550).
-- Indian Breads: Butter Naan (₹60), Garlic Cheese Naan (₹100), Tandoori Roti (₹20).
-- Beverages: Fresh Lime Soda (₹80), Diet Coke / Soft Drinks (₹60), Mineral Water (₹30).
-- Policies: We are strictly a luxury family fine-dining restaurant; we DO NOT serve hookah or alcohol.
-- Full PDF Menu Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
+      const menuKnowledge = menuList && menuList.length > 0 
+        ? menuList.map(item => `- ${item.name} (${item.category}): ₹${item.price} [${item.is_veg ? "Veg" : "Non-Veg"}]`).join("\n")
+        : `- Fish Fingers: ₹370\n- Chilli Chicken: ₹250\n- Royal Mutton Biryani: ₹390\n- Chicken Tikka: ₹320\n- Butter Naan: ₹60`;
 
-CHANNELS & WORKFLOWS:
-1. DINE-IN (TABLE ORDERING):
-   - If customer mentions a table (e.g. "We are at Table 4", "Table 2 ordering"): Confirm their items and table number.
-   - When confirmed, end your message with:
-     ORDER_DATA:{"table":"4","type":"dine_in","total":640,"items":"1x Chicken Biryani, 1x Reshmi Kebab"}
-     And instruct them: "Please show this Order ID to your captain/waiter. Your items are being sent to the kitchen!"
+      // System Prompt with Injected Ground Truth
+      const systemInstruction = `You are the authentic, intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
+Full Menu Drive Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
 
+OFFICIAL MENU RETRIEVED FROM DATABASE:
+${menuKnowledge}
+
+RESTAURANT RULES & POLICIES:
+- Fine Dining Policy: We DO NOT serve hookah or alcohol.
+- When asked if an item is available (e.g. mutton, fish fingers, kebabs): check the retrieved database menu above. If present, tell them warmly with the price! If not in the list (e.g. Mutton Kebab), state politely that we have Royal Mutton Biryani, and that mutton kebabs are chef specials on select tasting nights.
+
+CHANNELS & WORKFLOW:
+1. DINE-IN (At table):
+   - If customer states a table number (e.g., "Table 3"): Confirm their items and table.
+   - When confirmed, append at the end:
+     ORDER_DATA:{"table":"3","type":"dine_in","total":450}
+     And say: "Please show this Order ID to your captain/waiter. Your items are being sent to the kitchen!"
 2. TAKEAWAY & DELIVERY:
-   - When a customer wants to order: list the items, calculate the total price, and ask: "You've selected [Items] for a total of ₹[Total]. Shall I confirm this order? (Reply YES to confirm)".
-   - Only when they confirm with "YES" / "CONFIRM", end your message with:
-     ORDER_DATA:{"table":"takeaway","type":"takeaway","total":480,"items":"..."}
-     And state: "Thank you for ordering with us, you'll receive a confirmation call soon."
-
-3. RESERVATIONS:
+   - Calculate itemized subtotal from the menu list. Summarize and ask: "You've selected [Items] for a total of ₹[Total]. Would you like to confirm? (Reply YES to confirm)".
+   - Only when they confirm (YES/CONFIRM), append at the end:
+     ORDER_DATA:{"table":"takeaway","type":"takeaway","total":450}
+     And say: "Thank you for ordering with us, you'll receive a confirmation call soon."
+3. TABLE RESERVATIONS:
    - Ask for party size and preferred time. When confirmed, append:
-     RESERVATION_DATA:{"party_size":2,"time":"Evening"}
-
-4. GENERAL QUERIES & MENU:
-   - If they ask for the menu, share the highlights warmly and provide the Google Drive link.
-   - If they ask how you are, recommend dishes, ask about hookah, or ask anything else, respond authentically and helpfully.`;
+     RESERVATION_DATA:{"party_size":2,"time":"Evening"}`;
 
       let replyText = "";
 
-      // Call Google Gemini using the official SDK
-      const modelList = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"];
-      for (const m of modelList) {
+      // Call Gemini with Fallback
+      const candidateModels = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"];
+      for (const mod of candidateModels) {
         try {
-          const model = genAI.getGenerativeModel({ model: m });
+          const model = genAI.getGenerativeModel({ model: mod });
           const result = await model.generateContent([
-            { text: systemPrompt },
-            { text: `Customer Phone: ${fromPhone}\nCustomer says: ${incomingText}` }
+            { text: systemInstruction },
+            { text: `Customer Phone: ${fromPhone}\nCustomer Query: ${incomingText}` }
           ]);
           replyText = result.response.text();
           if (replyText) break;
         } catch (e) {
-          console.error(`Gemini SDK model ${m} error:`, e?.message);
+          console.error(`Model ${mod} failed:`, e?.message);
         }
       }
 
-      // Safe fallback only if Google's entire API is unreachable
       if (!replyText) {
-        replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ Our team is delighted to assist you. Would you like to view our menu, place an order for your table/takeaway, or make a reservation?";
+        replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You may view our menu, place an order, or reserve a table.";
       }
 
-      // Handle Order Confirmation & Supabase Database Insertion
+      // Handle Confirmed Orders into Database
       if (replyText.includes("ORDER_DATA:")) {
         const parts = replyText.split("ORDER_DATA:");
         replyText = parts[0].trim();
-        let payload = { total: 480, table: "takeaway", type: "takeaway" };
-        try {
-          payload = JSON.parse(parts[1].trim());
-        } catch (e) {}
+        let payload = { total: 370, table: "takeaway", type: "takeaway" };
+        try { payload = JSON.parse(parts[1].trim()); } catch (e) {}
 
         const orderNum = `ORD-${Date.now().toString().slice(-4)}`;
 
@@ -116,8 +113,8 @@ CHANNELS & WORKFLOWS:
           await supabase.from("orders").insert({
             order_number: orderNum,
             customer_id: customer.id,
-            total: payload.total || 480,
-            subtotal: payload.total || 480,
+            total: payload.total || 370,
+            subtotal: payload.total || 370,
             status: "new",
             payment_status: "pending",
             order_type: payload.type || "takeaway"
@@ -131,14 +128,12 @@ CHANNELS & WORKFLOWS:
         }
       }
 
-      // Handle Reservation & Supabase Database Insertion
+      // Handle Confirmed Reservations into Database
       if (replyText.includes("RESERVATION_DATA:")) {
         const parts = replyText.split("RESERVATION_DATA:");
         replyText = parts[0].trim();
         let resPayload = { party_size: 2, time: "Evening" };
-        try {
-          resPayload = JSON.parse(parts[1].trim());
-        } catch (e) {}
+        try { resPayload = JSON.parse(parts[1].trim()); } catch (e) {}
 
         await supabase.from("reservations").insert({
           customer_phone: fromPhone,
@@ -151,7 +146,7 @@ CHANNELS & WORKFLOWS:
         replyText += `\n\n✅ *Table Request Logged!*\nThank you for choosing Ilhaam Royal Dining, you'll receive a confirmation call soon.`;
       }
 
-      // Send Response to Customer via Meta Graph API
+      // Send Response to WhatsApp via Meta API
       await fetch(
         `https://graph.facebook.com/v25.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
         {
