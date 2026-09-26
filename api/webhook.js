@@ -29,9 +29,8 @@ export default async function handler(req, res) {
 
       const fromPhone = String(message.from).replace(/\D/g, "");
       const incomingText = message.text?.body?.trim() || "";
-      const lower = incomingText.toLowerCase();
 
-      // Parallel Fetch: Upsert Customer & Retrieve Live Menu from Supabase
+      // Parallel Fetch: Customer Record & Live Supabase Menu Knowledge Base
       const [customerRes, menuRes] = await Promise.all([
         supabase
           .from("customers")
@@ -56,29 +55,31 @@ export default async function handler(req, res) {
           .map((i) => `- ${i.name} (${i.category}): ₹${i.price} [${i.is_veg ? "Veg" : "Non-Veg"}]`)
           .join("\n");
       } else {
-        menuKnowledge = `- Fish Fingers (Starters): ₹370 [Non-Veg]\n- Chilli Chicken (Starters): ₹250 [Non-Veg]\n- Crispy Chilli Babycorn (Starters): ₹210 [Veg]\n- Kolkata Chicken Biryani (Biryani): ₹320 [Non-Veg]\n- Royal Mutton Biryani (Biryani): ₹390 [Non-Veg]\n- Butter Naan (Breads): ₹60 [Veg]`;
+        menuKnowledge = `- Fish Fingers (Starters): ₹370 [Non-Veg]\n- Chilli Chicken (Starters): ₹250 [Non-Veg]\n- Crispy Chilli Babycorn (Starters): ₹210 [Veg]\n- Kolkata Chicken Biryani (Biryani): ₹320 [Non-Veg]\n- Royal Mutton Biryani (Biryani): ₹390 [Non-Veg]\n- Reshmi Kebab (Tandoor): ₹320 [Non-Veg]\n- Butter Naan (Breads): ₹60 [Veg]`;
       }
 
-      // Master AI Prompt
-      const fullPrompt = `You are the authentic AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
+      // Master Conversational Prompt
+      const fullPrompt = `You are the authentic, intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
 Full Menu Drive Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
 
-LIVE MENU RETRIEVED FROM DATABASE:
+OFFICIAL MENU RETRIEVED FROM DATABASE:
 ${menuKnowledge}
 
-RULES & CULINARY POLICIES:
+RULES & CULINARY KNOWLEDGE:
 - Boneless: Reshmi Kebab, Chicken Tikka, and Chilli Chicken are boneless. Biryanis and Drums of Heaven are bone-in.
-- Hookah & Alcohol: Strictly prohibited. We do NOT serve hookah.
+- Hookah & Alcohol: Strictly unavailable. We are an upscale family fine-dining establishment.
 - Fish options: Fish Fingers (₹370).
 - Veg options: Crispy Chilli Babycorn (₹210), Cheese Kebab (₹440), Butter Naan (₹60), Garlic Cheese Naan (₹100).
-- Mutton Kebabs: Not on daily menu (we serve Royal Mutton Biryani; mutton kebabs are chef specials on tasting nights).
+- Mutton Kebabs: Not on the daily menu (we serve Royal Mutton Biryani; mutton kebabs are chef specials on tasting nights).
 
 WORKFLOW:
-1. Answer customer queries naturally, politely, and luxuriously.
-2. If customer wants to order: list the chosen items, calculate total from prices above, and ask: "You've selected [Items] for a total of ₹[Total]. Shall I confirm this order? (Reply YES to confirm)". DO NOT finalize yet.
+1. Answer ANY culinary, timing, or general question naturally, warmly, and helpfully.
+2. If customer wants to order: calculate the total using the prices above, summarize the items with quantities and total, and ask: "You've selected [Items] for a total of ₹[Total]. Shall I confirm this order? (Reply YES to confirm)". DO NOT finalize yet.
 3. When customer explicitly confirms (YES / CONFIRM / PROCEED):
-   - For table orders (e.g. Table 4), append: ORDER_DATA:{"table":"4","type":"dine_in","total":480}
-   - For takeaway/delivery, append: ORDER_DATA:{"table":"takeaway","type":"takeaway","total":480}
+   - For table orders (e.g. Table 4): append at the very end:
+     ORDER_DATA:{"table":"4","type":"dine_in","total":690}
+   - For takeaway/delivery: append at the very end:
+     ORDER_DATA:{"table":"takeaway","type":"takeaway","total":690}
 4. When customer wants table reservation: ask party size & time. When provided, append:
    RESERVATION_DATA:{"party_size":2,"time":"8:00 PM"}
 
@@ -89,15 +90,20 @@ Response:`;
 
       let replyText = "";
 
-      // Stable REST call to Google Gemini
+      // Standard Google REST Endpoint
       try {
         const geminiRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              contents: [{ parts: [{ text: fullPrompt }] }]
+              contents: [
+                {
+                  role: "user",
+                  parts: [{ text: fullPrompt }]
+                }
+              ]
             })
           }
         );
@@ -107,24 +113,12 @@ Response:`;
         console.error("Gemini REST Error:", err);
       }
 
-      // Dynamic Contextual Intelligence (Ensures it NEVER repeats generic welcome if AI drops)
+      // Safe fallback ONLY if the API request completely drops
       if (!replyText) {
-        if (lower.includes("fish") || lower.includes("veg")) {
-          replyText = "We have delightful options! 🍽️\n\n• *Fish Selection:* Crispy Fish Fingers (₹370)\n• *Vegetarian Delights:* Crispy Chilli Babycorn (₹210), Cheese Kebab (₹440), Butter Naan (₹60)\n\n📖 *View full menu:* https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view\n\nWhich of these would you like to order?";
-        } else if (lower.includes("boneless") || lower.includes("chicken")) {
-          replyText = "Our Reshmi Kebab, Chicken Tikka, and Chilli Chicken are boneless! The Kolkata Chicken Biryani and Drums of Heaven are prepared with bone-in cuts for authentic royal flavor. We do not serve hookah. What may we prepare for you?";
-        } else if (lower.includes("place an order") || lower.includes("order")) {
-          replyText = "We'd love to prepare a royal meal for you! 🍽️ Please let us know which dishes and quantities you'd like to order, and whether it's for Table Dine-In or Takeaway.";
-        } else if (lower.includes("menu")) {
-          replyText = `Welcome to *Ilhaam Royal Dining*! 🍽️✨\n\n• *Starters:* Fish Fingers (₹370), Chilli Chicken (₹250), Crispy Chilli Babycorn (₹210)\n• *Tandoor:* Chicken Tikka (₹320), Reshmi Kebab (₹320)\n• *Biryani:* Kolkata Chicken Biryani (₹320), Royal Mutton Biryani (₹390)\n\n📖 *Full Menu:* https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view\n\nWhat would you like to order?`;
-        } else if (lower === "yes" || lower === "confirm") {
-          replyText = "Thank you! Your order has been placed.\n\nORDER_DATA:{\"total\":480}";
-        } else {
-          replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You can ask about our menu, place an order, or reserve a table.";
-        }
+        replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You can ask about our menu, place an order, or reserve a table. Or call us directly at +91 74499 88873.";
       }
 
-      // Order Placement into Supabase Database
+      // Order Placement into Database
       if (replyText.includes("ORDER_DATA:")) {
         const parts = replyText.split("ORDER_DATA:");
         replyText = parts[0].trim();
@@ -154,7 +148,7 @@ Response:`;
         }
       }
 
-      // Reservation Placement into Supabase Database
+      // Reservation Placement into Database
       if (replyText.includes("RESERVATION_DATA:")) {
         const parts = replyText.split("RESERVATION_DATA:");
         replyText = parts[0].trim();
