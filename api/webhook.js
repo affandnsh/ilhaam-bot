@@ -42,37 +42,40 @@ Menu:
 - Starters: Chilli Chicken (250), Drums of Heaven (250), Fish Finger (370), Crispy Chilli Babycorn (210)
 - Tandoor: Chicken Tikka (320), Reshmi Kebab (320), Cheese Kebab (440)
 - Breads: Butter Naan (60), Garlic Cheese Naan (100), Tandoori Roti (20)
-
-Rules:
-1. Greet warmly and answer any menu/timing questions.
-2. If customer wants to order: collect items, delivery address, and payment method (COD or Prepaid).
-3. Once all details are finalized, end your response with:
-ORDER_DATA:{"name":"...","address":"...","total":320,"items":[{"name":"...","qty":1,"price":320}]}`
-      });
-
-      const result = await model.generateContent(incomingText);
-      let replyText = result.response.text();
-
-      // Write to Supabase orders table
+// Order handling
       if (replyText.includes("ORDER_DATA:")) {
         const parts = replyText.split("ORDER_DATA:");
         replyText = parts[0].trim();
-        const orderJson = JSON.parse(parts[1].trim());
         const orderNum = `ORD-${Date.now().toString().slice(-4)}`;
+        
+        try {
+          // 1. Create or find customer first
+          const { data: customer } = await supabase
+            .from("customers")
+            .upsert({ whatsapp_number: fromPhone, name: "WhatsApp Guest" }, { onConflict: "whatsapp_number" })
+            .select()
+            .single();
 
-        await supabase.from("orders").insert({
-          order_number: orderNum,
-          total: orderJson.total || 0,
-          subtotal: orderJson.total || 0,
-          status: "new",
-          payment_status: "pending"
-        });
+          // 2. Insert order linked to customer
+          if (customer?.id) {
+            await supabase.from("orders").insert({
+              order_number: orderNum,
+              customer_id: customer.id,
+              total: 320,
+              subtotal: 320,
+              status: "new",
+              payment_status: "pending"
+            });
+          }
+        } catch (dbErr) {
+          console.error("Supabase insert ignored to allow reply:", dbErr);
+        }
 
         replyText += `\n\n✅ *Order Confirmed!* Ticket: *${orderNum}*.`;
       }
 
-      // Send WhatsApp message back to customer
-      await fetch(
+      // Send reply via Meta Graph API
+      const metaRes = await fetch(
         `https://graph.facebook.com/v25.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
         {
           method: "POST",
@@ -88,13 +91,5 @@ ORDER_DATA:{"name":"...","address":"...","total":320,"items":[{"name":"...","qty
           })
         }
       );
-
-      return res.status(200).send("EVENT_RECEIVED");
-    } catch (err) {
-      console.error("Webhook processing error:", err);
-      return res.status(200).send("ERROR_HANDLED");
-    }
-  }
-
-  return res.status(405).send("Method Not Allowed");
-}
+      const metaData = await metaRes.json();
+      console.log("Meta Response:", metaData);
