@@ -9,7 +9,7 @@ const supabase = createClient(
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 export default async function handler(req, res) {
-  // 1. Meta Webhook Verification
+  // 1. Meta Webhook Verification Handshake
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -33,7 +33,7 @@ export default async function handler(req, res) {
       const fromPhone = String(message.from).replace(/\D/g, "");
       const incomingText = message.text.body.trim();
 
-      // Ensure customer exists
+      // Ensure customer exists in database
       const { data: customer } = await supabase
         .from("customers")
         .upsert(
@@ -43,56 +43,61 @@ export default async function handler(req, res) {
         .select()
         .single();
 
-      // RAG RETRIEVAL: Pull live menu knowledge base from Supabase
+      // Fetch live menu from Supabase
       const { data: menuList } = await supabase
         .from("menu_items")
         .select("name, category, price, is_veg, is_available");
 
-      const menuKnowledge = menuList && menuList.length > 0 
+      const menuKnowledge = menuList && menuList.length > 0
         ? menuList.map(item => `- ${item.name} (${item.category}): ₹${item.price} [${item.is_veg ? "Veg" : "Non-Veg"}]`).join("\n")
-        : `- Fish Fingers: ₹370\n- Chilli Chicken: ₹250\n- Royal Mutton Biryani: ₹390\n- Chicken Tikka: ₹320\n- Butter Naan: ₹60`;
+        : `- Fish Fingers: ₹370\n- Chilli Chicken: ₹250\n- Drums of Heaven: ₹250\n- Kolkata Chicken Biryani: ₹320\n- Royal Mutton Biryani: ₹390\n- Reshmi Kebab: ₹320\n- Butter Naan: ₹60`;
 
-      // System Prompt with Injected Ground Truth
-      const systemInstruction = `You are the authentic, intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
-Full Menu Drive Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
+      // Master Intelligent Prompt
+      const fullPrompt = `You are the authentic, knowledgeable AI Concierge for "Ilhaam Royal Dining", a luxury fine-dining restaurant in Park Circus, Kolkata (+91 744 998 8873).
+Menu Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
 
 OFFICIAL MENU RETRIEVED FROM DATABASE:
 ${menuKnowledge}
 
-RESTAURANT RULES & POLICIES:
-- Fine Dining Policy: We DO NOT serve hookah or alcohol.
-- When asked if an item is available (e.g. mutton, fish fingers, kebabs): check the retrieved database menu above. If present, tell them warmly with the price! If not in the list (e.g. Mutton Kebab), state politely that we have Royal Mutton Biryani, and that mutton kebabs are chef specials on select tasting nights.
+CULINARY KNOWLEDGE & POLICIES:
+- Boneless questions: Reshmi Kebab, Chicken Tikka, and Chilli Chicken are boneless. Biryanis and Drums of Heaven are bone-in.
+- Hookah & Alcohol: Strictly prohibited. We are a family fine-dining restaurant and do NOT serve hookah.
+- Mutton Kebabs: Not on the regular daily menu (we serve Royal Mutton Biryani; mutton kebabs are chef specials on tasting nights).
+- If customer asks for menu: share an elegant summary across sections with the Google Drive menu link.
 
-CHANNELS & WORKFLOW:
-1. DINE-IN (At table):
-   - If customer states a table number (e.g., "Table 3"): Confirm their items and table.
-   - When confirmed, append at the end:
-     ORDER_DATA:{"table":"3","type":"dine_in","total":450}
-     And say: "Please show this Order ID to your captain/waiter. Your items are being sent to the kitchen!"
-2. TAKEAWAY & DELIVERY:
-   - Calculate itemized subtotal from the menu list. Summarize and ask: "You've selected [Items] for a total of ₹[Total]. Would you like to confirm? (Reply YES to confirm)".
-   - Only when they confirm (YES/CONFIRM), append at the end:
-     ORDER_DATA:{"table":"takeaway","type":"takeaway","total":450}
-     And say: "Thank you for ordering with us, you'll receive a confirmation call soon."
-3. TABLE RESERVATIONS:
-   - Ask for party size and preferred time. When confirmed, append:
-     RESERVATION_DATA:{"party_size":2,"time":"Evening"}`;
+WORKFLOW RULES:
+1. Answering Questions: Answer any culinary, timing, or ingredient question warmly and intelligently.
+2. Ordering:
+   - When a customer wants to order: clarify dishes and quantities, calculate the total amount from the menu, and summarize: "You've selected [Items] for ₹[Total]. Shall I confirm this order? (Reply YES to confirm)". DO NOT finalize yet.
+   - When they confirm (YES / CONFIRM / PROCEED):
+     * If DINE-IN (mentioning table, e.g. Table 4): append at the very end:
+       ORDER_DATA:{"table":"4","type":"dine_in","total":480}
+     * If TAKEAWAY/DELIVERY: append at the very end:
+       ORDER_DATA:{"table":"takeaway","type":"takeaway","total":480}
+3. Reservations:
+   - Ask for party size and preferred time. When confirmed, append at the end:
+     RESERVATION_DATA:{"party_size":2,"time":"Evening"}
+
+CUSTOMER PHONE: ${fromPhone}
+CUSTOMER MESSAGE: "${incomingText}"
+
+Response:`;
 
       let replyText = "";
 
-      // Call Gemini with Fallback
-      const candidateModels = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-pro"];
-      for (const mod of candidateModels) {
+      // Call Gemini Flash with clean text payload
+      try {
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const result = await model.generateContent(fullPrompt);
+        replyText = result.response.text();
+      } catch (gemErr) {
+        console.error("Gemini 1.5 Flash error, attempting fallback:", gemErr?.message);
         try {
-          const model = genAI.getGenerativeModel({ model: mod });
-          const result = await model.generateContent([
-            { text: systemInstruction },
-            { text: `Customer Phone: ${fromPhone}\nCustomer Query: ${incomingText}` }
-          ]);
-          replyText = result.response.text();
-          if (replyText) break;
-        } catch (e) {
-          console.error(`Model ${mod} failed:`, e?.message);
+          const fallbackModel = genAI.getGenerativeModel({ model: "gemini-pro" });
+          const fbResult = await fallbackModel.generateContent(fullPrompt);
+          replyText = fbResult.response.text();
+        } catch (fbErr) {
+          console.error("Gemini Pro fallback error:", fbErr?.message);
         }
       }
 
@@ -104,7 +109,7 @@ CHANNELS & WORKFLOW:
       if (replyText.includes("ORDER_DATA:")) {
         const parts = replyText.split("ORDER_DATA:");
         replyText = parts[0].trim();
-        let payload = { total: 370, table: "takeaway", type: "takeaway" };
+        let payload = { total: 480, table: "takeaway", type: "takeaway" };
         try { payload = JSON.parse(parts[1].trim()); } catch (e) {}
 
         const orderNum = `ORD-${Date.now().toString().slice(-4)}`;
@@ -113,8 +118,8 @@ CHANNELS & WORKFLOW:
           await supabase.from("orders").insert({
             order_number: orderNum,
             customer_id: customer.id,
-            total: payload.total || 370,
-            subtotal: payload.total || 370,
+            total: payload.total || 480,
+            subtotal: payload.total || 480,
             status: "new",
             payment_status: "pending",
             order_type: payload.type || "takeaway"
