@@ -35,7 +35,7 @@ export default async function handler(req, res) {
 
       // Gemini AI Engine
       const model = genAI.getGenerativeModel({
-        model: "gemini-1.5-flash",
+        model: "gemini-1.5-flash-latest",
         systemInstruction: `You are the AI concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
 Menu:
 - Biryani: Chicken Biryani (320), Special Chicken Biryani (500), Mutton Biryani (390), Special Mutton Biryani (550)
