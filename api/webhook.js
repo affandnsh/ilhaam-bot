@@ -1,14 +1,12 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SECRET_KEY
 );
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 export default async function handler(req, res) {
-  // 1. Meta Webhook Handshake
+  // 1. Meta Webhook Verification Handshake
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -25,6 +23,7 @@ export default async function handler(req, res) {
       const entry = req.body?.entry?.[0]?.changes?.[0]?.value;
       const message = entry?.messages?.[0];
 
+      // Ignore delivery receipts or non-text messages
       if (!message || message.type !== "text") {
         return res.status(200).send("OK");
       }
@@ -32,18 +31,64 @@ export default async function handler(req, res) {
       const fromPhone = String(message.from).replace(/\D/g, "");
       const incomingText = message.text.body;
 
-      // Gemini Response
-      const model = genAI.getGenerativeModel({
-        model: "gemini-1.5-flash",
-        systemInstruction: `You are the AI concierge for "Ilhaam Royal Dining", Park Circus, Kolkata (+91 744 998 8873).
+      let replyText = "";
+
+      // Call Gemini API via direct REST (100% stable, bypasses SDK version bugs)
+      try {
+        const geminiRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: incomingText }] }],
+              systemInstruction: {
+                parts: [{
+                  text: `You are the WhatsApp AI concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
 Menu: Chicken Biryani (320), Special Chicken Biryani (500), Mutton Biryani (390), Butter Naan (60), Chicken Tikka (320).
-Greet the customer politely and answer menu questions. Keep responses short and friendly.`
-      });
+Greet the customer politely, answer menu queries briefly. If they order, give a warm confirmation.`
+                }]
+              }
+            })
+          }
+        );
+        const geminiData = await geminiRes.json();
+        replyText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
+      } catch (aiErr) {
+        console.error("Gemini fallback triggered:", aiErr);
+      }
 
-      const result = await model.generateContent(incomingText);
-      const replyText = result.response.text();
+      // Safe Fallback if Gemini key is rate-limited or fails
+      if (!replyText) {
+        replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️\nHow can we help you today?\n\n1. View Menu\n2. Order Food (Chicken Biryani ₹320, Mutton Biryani ₹390)\n3. Book a Table\n\nCall us: +91 744 998 8873";
+      }
 
-      // Send WhatsApp message back
+      // Safe Supabase Customer & Order insertion
+      try {
+        const { data: customer } = await supabase
+          .from("customers")
+          .upsert(
+            { whatsapp_number: fromPhone, name: "WhatsApp Guest" },
+            { onConflict: "whatsapp_number" }
+          )
+          .select()
+          .single();
+
+        if (customer?.id && incomingText.toLowerCase().includes("order")) {
+          await supabase.from("orders").insert({
+            order_number: `ORD-${Date.now().toString().slice(-4)}`,
+            customer_id: customer.id,
+            total: 320,
+            subtotal: 320,
+            status: "new",
+            payment_status: "pending"
+          });
+        }
+      } catch (dbErr) {
+        console.error("DB error ignored to preserve WhatsApp reply:", dbErr);
+      }
+
+      // Send WhatsApp message back to customer via Meta API
       const metaRes = await fetch(
         `https://graph.facebook.com/v25.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
         {
@@ -60,13 +105,12 @@ Greet the customer politely and answer menu questions. Keep responses short and 
           })
         }
       );
-
       const metaData = await metaRes.json();
-      console.log("Meta API Response:", metaData);
+      console.log("Meta API Response:", JSON.stringify(metaData));
 
       return res.status(200).send("EVENT_RECEIVED");
     } catch (err) {
-      console.error("Webhook processing error:", err);
+      console.error("Critical webhook error:", err);
       return res.status(200).send("ERROR_HANDLED");
     }
   }
