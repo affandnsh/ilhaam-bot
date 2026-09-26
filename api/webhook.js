@@ -8,7 +8,7 @@ const supabase = createClient(
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 export default async function handler(req, res) {
-  // 1. Meta Webhook Verification Handshake
+  // 1. Meta Webhook Handshake
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -25,67 +25,25 @@ export default async function handler(req, res) {
       const entry = req.body?.entry?.[0]?.changes?.[0]?.value;
       const message = entry?.messages?.[0];
 
-      // Ignore delivery receipts or non-text messages cleanly
       if (!message || message.type !== "text") {
         return res.status(200).send("OK");
       }
 
-      const fromPhone = message.from;
+      const fromPhone = String(message.from).replace(/\D/g, "");
       const incomingText = message.text.body;
 
-      // Gemini AI Engine
+      // Gemini Response
       const model = genAI.getGenerativeModel({
         model: "gemini-1.5-flash-latest",
-        systemInstruction: `You are the AI concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
-Menu:
-- Biryani: Chicken Biryani (320), Special Chicken Biryani (500), Mutton Biryani (390), Special Mutton Biryani (550)
-- Starters: Chilli Chicken (250), Drums of Heaven (250), Fish Finger (370), Crispy Chilli Babycorn (210)
-- Tandoor: Chicken Tikka (320), Reshmi Kebab (320), Cheese Kebab (440)
-- Breads: Butter Naan (60), Garlic Cheese Naan (100), Tandoori Roti (20)
-
-Rules:
-1. Greet warmly and answer menu/timing queries.
-2. If customer wants to order: collect their name, address, and items.
-3. Once finalized, append this exact block at the very end:
-ORDER_DATA:{"name":"...","address":"...","total":320}`
+        systemInstruction: `You are the AI concierge for "Ilhaam Royal Dining", Park Circus, Kolkata (+91 744 998 8873).
+Menu: Chicken Biryani (320), Special Chicken Biryani (500), Mutton Biryani (390), Butter Naan (60), Chicken Tikka (320).
+Greet the customer politely and answer menu questions. Keep responses short and friendly.`
       });
 
       const result = await model.generateContent(incomingText);
-      let replyText = result.response.text();
+      const replyText = result.response.text();
 
-      // Order handling and database write
-      if (replyText.includes("ORDER_DATA:")) {
-        const parts = replyText.split("ORDER_DATA:");
-        replyText = parts[0].trim();
-        const orderNum = `ORD-${Date.now().toString().slice(-4)}`;
-        
-        try {
-          // 1. Create or find customer
-          const { data: customer } = await supabase
-            .from("customers")
-            .upsert({ whatsapp_number: fromPhone, name: "WhatsApp Guest" }, { onConflict: "whatsapp_number" })
-            .select()
-            .single();
-
-          // 2. Insert order linked to customer
-          if (customer?.id) {
-            await supabase.from("orders").insert({
-              order_number: orderNum,
-              customer_id: customer.id,
-              total: 320,
-              subtotal: 320,
-              status: "new",
-              payment_status: "pending"
-            });
-          }
-        } catch (dbErr) {
-          console.error("Supabase insert error:", dbErr);
-        }
-
-        replyText += `\n\n✅ *Order Confirmed!* Ticket: *${orderNum}*.`;
-      }
-
-      // Send reply via Meta Graph API
+      // Send WhatsApp message back
       const metaRes = await fetch(
         `https://graph.facebook.com/v25.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
         {
@@ -102,8 +60,9 @@ ORDER_DATA:{"name":"...","address":"...","total":320}`
           })
         }
       );
+
       const metaData = await metaRes.json();
-      console.log("Meta Response:", metaData);
+      console.log("Meta API Response:", metaData);
 
       return res.status(200).send("EVENT_RECEIVED");
     } catch (err) {
