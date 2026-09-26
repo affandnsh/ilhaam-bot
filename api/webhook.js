@@ -6,7 +6,6 @@ const supabase = createClient(
 );
 
 export default async function handler(req, res) {
-  // 1. Meta Webhook Verification Handshake
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -17,13 +16,11 @@ export default async function handler(req, res) {
     return res.status(403).send("Forbidden");
   }
 
-  // 2. Incoming WhatsApp Message
   if (req.method === "POST") {
     try {
       const entry = req.body?.entry?.[0]?.changes?.[0]?.value;
       const message = entry?.messages?.[0];
 
-      // Ignore delivery receipts or non-text messages
       if (!message || message.type !== "text") {
         return res.status(200).send("OK");
       }
@@ -33,63 +30,95 @@ export default async function handler(req, res) {
 
       let replyText = "";
 
-      // Call Gemini API via direct REST (100% stable, bypasses SDK version bugs)
+      // 1. Call Gemini via standard REST
       try {
+        const prompt = `You are the AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
+Menu: Chicken Biryani (320), Special Chicken Biryani (500), Mutton Biryani (390), Butter Naan (60), Chicken Tikka (320).
+User said: "${incomingText}"
+
+Instructions:
+- If they want to order: ask what they'd like, or confirm their items and address.
+- If they want to book a table: ask for party size and preferred time.
+- If they just greet: greet warmly and offer Menu, Order, or Booking.
+- Keep the response short, warm, and conversational.
+- When an order is clearly requested/confirmed, include at the very end:
+ORDER_DATA:{"total":320}
+- When a reservation is requested, include at the very end:
+RESERVATION_DATA:{"party_size":2,"time":"Tonight"}`;
+
         const geminiRes = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              contents: [{ parts: [{ text: incomingText }] }],
-              systemInstruction: {
-                parts: [{
-                  text: `You are the WhatsApp AI concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
-Menu: Chicken Biryani (320), Special Chicken Biryani (500), Mutton Biryani (390), Butter Naan (60), Chicken Tikka (320).
-Greet the customer politely, answer menu queries briefly. If they order, give a warm confirmation.`
-                }]
-              }
+              contents: [{ parts: [{ text: prompt }] }]
             })
           }
         );
         const geminiData = await geminiRes.json();
         replyText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
-      } catch (aiErr) {
-        console.error("Gemini fallback triggered:", aiErr);
+      } catch (e) {
+        console.error("AI error:", e);
       }
 
-      // Safe Fallback if Gemini key is rate-limited or fails
       if (!replyText) {
-        replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️\nHow can we help you today?\n\n1. View Menu\n2. Order Food (Chicken Biryani ₹320, Mutton Biryani ₹390)\n3. Book a Table\n\nCall us: +91 744 998 8873";
+        replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️\nHow can we serve you today?\n\n1. Place an Order\n2. Book a Table\n3. View Menu";
       }
 
-      // Safe Supabase Customer & Order insertion
-      try {
-        const { data: customer } = await supabase
-          .from("customers")
-          .upsert(
-            { whatsapp_number: fromPhone, name: "WhatsApp Guest" },
-            { onConflict: "whatsapp_number" }
-          )
-          .select()
-          .single();
+      // 2. Handle Order Insertion into Supabase
+      if (replyText.includes("ORDER_DATA:")) {
+        const parts = replyText.split("ORDER_DATA:");
+        replyText = parts[0].trim();
+        const orderNum = `ORD-${Date.now().toString().slice(-4)}`;
 
-        if (customer?.id && incomingText.toLowerCase().includes("order")) {
-          await supabase.from("orders").insert({
-            order_number: `ORD-${Date.now().toString().slice(-4)}`,
-            customer_id: customer.id,
-            total: 320,
-            subtotal: 320,
-            status: "new",
-            payment_status: "pending"
-          });
+        try {
+          // Upsert customer
+          const { data: cust } = await supabase
+            .from("customers")
+            .upsert({ whatsapp_number: fromPhone, name: "WhatsApp Guest" }, { onConflict: "whatsapp_number" })
+            .select()
+            .single();
+
+          if (cust?.id) {
+            await supabase.from("orders").insert({
+              order_number: orderNum,
+              customer_id: cust.id,
+              total: 320,
+              subtotal: 320,
+              status: "new",
+              payment_status: "pending"
+            });
+          }
+        } catch (dbErr) {
+          console.error("Order DB write error:", dbErr);
         }
-      } catch (dbErr) {
-        console.error("DB error ignored to preserve WhatsApp reply:", dbErr);
+
+        replyText += `\n\n✅ *Order Confirmed!* Ticket: *${orderNum}*.`;
       }
 
-      // Send WhatsApp message back to customer via Meta API
-      const metaRes = await fetch(
+      // 3. Handle Reservation Insertion into Supabase
+      if (replyText.includes("RESERVATION_DATA:")) {
+        const parts = replyText.split("RESERVATION_DATA:");
+        replyText = parts[0].trim();
+
+        try {
+          await supabase.from("reservations").insert({
+            customer_phone: fromPhone,
+            customer_name: "WhatsApp Guest",
+            party_size: 2,
+            booking_time: "Evening",
+            status: "pending"
+          });
+        } catch (resErr) {
+          console.error("Reservation DB write error:", resErr);
+        }
+
+        replyText += `\n\n✅ *Table Request Logged!* Our team is reserving your spot.`;
+      }
+
+      // 4. Send Message back to Customer
+      await fetch(
         `https://graph.facebook.com/v25.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
         {
           method: "POST",
@@ -105,12 +134,10 @@ Greet the customer politely, answer menu queries briefly. If they order, give a 
           })
         }
       );
-      const metaData = await metaRes.json();
-      console.log("Meta API Response:", JSON.stringify(metaData));
 
       return res.status(200).send("EVENT_RECEIVED");
     } catch (err) {
-      console.error("Critical webhook error:", err);
+      console.error("Handler error:", err);
       return res.status(200).send("ERROR_HANDLED");
     }
   }
