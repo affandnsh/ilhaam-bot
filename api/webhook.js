@@ -74,9 +74,10 @@ async function getGeminiModel() {
     throw new Error("No Gemini model supporting generateContent is available for this API key");
   }
 
+  // Pick Flash models first
   const preferred = models.find((name) => /flash/i.test(name) && !/embedding|image|tts|live|audio/i.test(name));
   const selected = preferred || models[0];
-  
+
   cachedModel = selected.startsWith("models/") ? selected.slice("models/".length) : selected;
   console.log("Active Gemini model selected:", cachedModel);
   return cachedModel;
