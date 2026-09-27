@@ -1,3 +1,4 @@
+import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -9,6 +10,9 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 const GRAPH_VERSION = "v26.0";
 const GEMINI_MODEL = "gemini-3.8-flash";
+
+// Official SDK Client
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_SECRET_KEY) {
@@ -42,55 +46,38 @@ async function sendWhatsApp(to, text) {
   }
 }
 
-// Resilient Google Gemini Brain using official Interactions & REST standards
 async function askGemini(prompt) {
   if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
 
-  // 1. Interactions API with standard authentication headers
+  // 1. Primary: Use the official SDK Interactions/generate method
   try {
-    const interactionsRes = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-      },
-      body: JSON.stringify({
-        model: GEMINI_MODEL,
-        input: prompt
-      })
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt
     });
-
-    if (interactionsRes.ok) {
-      const data = await interactionsRes.json();
-      const output = data.output_text || data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (output) return output.trim();
-    }
+    const output = response.text;
+    if (output) return output.trim();
   } catch (err) {
-    console.warn("Interactions API attempt failed:", err.message);
+    console.warn("Primary SDK call failed, trying direct endpoint:", err.message);
   }
 
-  // 2. Fallback to generateContent with x-goog-api-key header
-  const genRes = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-      },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }]
-      })
-    }
-  );
+  // 2. Fallback: Direct endpoint with API key parameter
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }]
+    })
+  });
 
-  if (!genRes.ok) {
-    const errBody = await genRes.text();
-    throw new Error(`Google API failed (${genRes.status}): ${errBody}`);
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`API failed (${res.status}): ${errBody}`);
   }
 
-  const genData = await genRes.json();
-  const text = genData?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const data = await res.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("No text returned by Gemini");
   return text.trim();
 }
@@ -166,7 +153,7 @@ Response:`;
       reply = await askGemini(prompt);
     } catch (e) {
       console.error("AI Generation Error:", e);
-      reply = "I apologize, our dining concierge is taking a quick moment to check the kitchen. Please message once again or call us directly at +91 74499 88873.";
+      reply = "Warm greetings from Ilhaam Royal Dining! 🍽️✨ How may we assist your dining experience today? You can ask about our menu, dietary preferences, or place an order.";
     }
 
     // Process Orders into Supabase
@@ -188,7 +175,7 @@ Response:`;
           payment_status: "pending",
           order_type: payload.type || "takeaway"
         });
-        reply += `\n\n✅ *Order Ticket Created:* *${orderNumber}*\nYour order has been sent to our counter team!`;
+        reply += `\n\n✅ *Order Ticket Created:* *${orderNumber}*\nYour order has been recorded! Our counter team will prepare it for you.`;
       }
     }
 
