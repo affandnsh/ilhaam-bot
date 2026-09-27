@@ -23,14 +23,42 @@ export default async function handler(req, res) {
       const entry = req.body?.entry?.[0];
       const message = entry?.changes?.[0]?.value?.messages?.[0];
 
-      if (!message || message.type !== "text") {
+      if (!message) {
         return res.status(200).send("OK");
       }
 
       const fromPhone = String(message.from).replace(/\D/g, "");
+
+      // Handle Voice Notes Gracefully
+      if (message.type === "audio" || message.type === "voice") {
+        await fetch(
+          `https://graph.facebook.com/v26.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              messaging_product: "whatsapp",
+              to: fromPhone,
+              type: "text",
+              text: {
+                body: "We received your voice note! 🎙️✨ To ensure 100% accuracy for our kitchen staff, please send your order or questions as a text message, or call us directly at +91 74499 88873."
+              }
+            })
+          }
+        );
+        return res.status(200).send("EVENT_RECEIVED");
+      }
+
+      if (message.type !== "text") {
+        return res.status(200).send("OK");
+      }
+
       const incomingText = message.text?.body?.trim() || "";
 
-      // Parallel Fetch: Customer Record & Live Supabase Menu Knowledge Base
+      // Parallel Fetch: Upsert Customer & Read Live Menu from Supabase
       const [customerRes, menuRes] = await Promise.all([
         supabase
           .from("customers")
@@ -58,7 +86,7 @@ export default async function handler(req, res) {
         menuKnowledge = `- Fish Fingers (Starters): ₹370 [Non-Veg]\n- Chilli Chicken (Starters): ₹250 [Non-Veg]\n- Crispy Chilli Babycorn (Starters): ₹210 [Veg]\n- Kolkata Chicken Biryani (Biryani): ₹320 [Non-Veg]\n- Royal Mutton Biryani (Biryani): ₹390 [Non-Veg]\n- Reshmi Kebab (Tandoor): ₹320 [Non-Veg]\n- Butter Naan (Breads): ₹60 [Veg]`;
       }
 
-      // Master Conversational Prompt
+      // Master Prompt
       const fullPrompt = `You are the authentic, intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
 Full Menu Drive Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
 
@@ -90,7 +118,7 @@ Response:`;
 
       let replyText = "";
 
-      // Standard Google REST Endpoint
+      // Google Gemini REST Call
       try {
         const geminiRes = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
@@ -113,7 +141,6 @@ Response:`;
         console.error("Gemini REST Error:", err);
       }
 
-      // Safe fallback ONLY if the API request completely drops
       if (!replyText) {
         replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You can ask about our menu, place an order, or reserve a table. Or call us directly at +91 74499 88873.";
       }
@@ -168,7 +195,7 @@ Response:`;
         replyText += `\n\n✅ *Table Request Logged!*\nThank you for choosing Ilhaam Royal Dining, you'll receive a confirmation call soon.`;
       }
 
-      // Send WhatsApp Response via Meta API v26.0
+      // Send Response via Meta API
       await fetch(
         `https://graph.facebook.com/v26.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
         {
