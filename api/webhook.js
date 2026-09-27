@@ -1,9 +1,14 @@
+import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SECRET_KEY
 );
+
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY
+});
 
 export default async function handler(req, res) {
   // 1. Meta Webhook Verification Handshake
@@ -29,7 +34,7 @@ export default async function handler(req, res) {
 
       const fromPhone = String(message.from).replace(/\D/g, "");
 
-      // Handle Voice Notes Gracefully
+      // Handle Voice Notes
       if (message.type === "audio" || message.type === "voice") {
         await fetch(
           `https://graph.facebook.com/v26.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
@@ -58,7 +63,7 @@ export default async function handler(req, res) {
 
       const incomingText = message.text?.body?.trim() || "";
 
-      // Parallel Fetch: Upsert Customer & Read Live Menu from Supabase
+      // Parallel Fetch: Upsert Customer & Read Menu from Supabase
       const [customerRes, menuRes] = await Promise.all([
         supabase
           .from("customers")
@@ -86,8 +91,8 @@ export default async function handler(req, res) {
         menuKnowledge = `- Fish Fingers (Starters): ₹370 [Non-Veg]\n- Chilli Chicken (Starters): ₹250 [Non-Veg]\n- Crispy Chilli Babycorn (Starters): ₹210 [Veg]\n- Kolkata Chicken Biryani (Biryani): ₹320 [Non-Veg]\n- Royal Mutton Biryani (Biryani): ₹390 [Non-Veg]\n- Reshmi Kebab (Tandoor): ₹320 [Non-Veg]\n- Butter Naan (Breads): ₹60 [Veg]`;
       }
 
-      // Master Prompt
-      const fullPrompt = `You are the authentic, intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
+      // Master AI Prompt
+      const systemInstruction = `You are the authentic, highly intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
 Full Menu Drive Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
 
 OFFICIAL MENU RETRIEVED FROM DATABASE:
@@ -98,7 +103,7 @@ RULES & CULINARY KNOWLEDGE:
 - Hookah & Alcohol: Strictly unavailable. We are an upscale family fine-dining establishment.
 - Fish options: Fish Fingers (₹370).
 - Veg options: Crispy Chilli Babycorn (₹210), Cheese Kebab (₹440), Butter Naan (₹60), Garlic Cheese Naan (₹100).
-- Mutton Kebabs: Not on the daily menu (we serve Royal Mutton Biryani; mutton kebabs are chef specials on tasting nights).
+- Mutton Kebabs: Not on the regular daily menu (we serve Royal Mutton Biryani; mutton kebabs are chef specials on tasting nights).
 
 WORKFLOW:
 1. Answer ANY culinary, timing, or general question naturally, warmly, and helpfully.
@@ -109,36 +114,37 @@ WORKFLOW:
    - For takeaway/delivery: append at the very end:
      ORDER_DATA:{"table":"takeaway","type":"takeaway","total":690}
 4. When customer wants table reservation: ask party size & time. When provided, append:
-   RESERVATION_DATA:{"party_size":2,"time":"8:00 PM"}
-
-Customer Phone: ${fromPhone}
-Customer says: "${incomingText}"
-
-Response:`;
+   RESERVATION_DATA:{"party_size":2,"time":"8:00 PM"}`;
 
       let replyText = "";
 
-      // Google Gemini REST Call
+      // Native SDK Call via @google/genai
       try {
-        const geminiRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [
-                {
-                  role: "user",
-                  parts: [{ text: fullPrompt }]
-                }
-              ]
-            })
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: incomingText,
+          config: {
+            systemInstruction: systemInstruction,
+            temperature: 0.3
           }
-        );
-        const geminiData = await geminiRes.json();
-        replyText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-      } catch (err) {
-        console.error("Gemini REST Error:", err);
+        });
+        replyText = response.text?.trim() || "";
+      } catch (gemErr) {
+        console.error("Gemini SDK Primary Error:", gemErr);
+        // Fallback to gemini-2.0-flash if needed
+        try {
+          const fallbackRes = await ai.models.generateContent({
+            model: "gemini-2.0-flash",
+            contents: incomingText,
+            config: {
+              systemInstruction: systemInstruction,
+              temperature: 0.3
+            }
+          });
+          replyText = fallbackRes.text?.trim() || "";
+        } catch (fbErr) {
+          console.error("Gemini SDK Fallback Error:", fbErr);
+        }
       }
 
       if (!replyText) {
