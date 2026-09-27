@@ -36,21 +36,47 @@ async function sendWhatsApp(to, text) {
   });
 }
 
+// Official Interactions API for gemini-3.8-flash
 async function askGemini(prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-  const res = await fetch(url, {
+  // 1. Try official Interactions endpoint
+  const interactionsUrl = `https://generativelanguage.googleapis.com/v1beta/interactions?key=${GEMINI_API_KEY}`;
+  
+  try {
+    const res = await fetch(interactionsUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: GEMINI_MODEL,
+        input: prompt
+      })
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const output = data.output_text || data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (output) return output.trim();
+    }
+  } catch (e) {
+    console.warn("Interactions API call error:", e.message);
+  }
+
+  // 2. Fallback to standard generateContent if interactions isn't provisioned yet
+  const standardUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const stdRes = await fetch(standardUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }]
     })
   });
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Gemini failed ${res.status}: ${errText}`);
+
+  if (!stdRes.ok) {
+    const err = await stdRes.text();
+    throw new Error(`Gemini failed ${stdRes.status}: ${err}`);
   }
-  const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+
+  const stdData = await stdRes.json();
+  return stdData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
 }
 
 async function getMenu() {
@@ -116,7 +142,6 @@ Response:`;
       reply = await askGemini(prompt);
     } catch (e) {
       console.error("AI Error:", e);
-      // Clean fallback if Google 503s
       if (incomingText.toLowerCase().includes("order")) {
         reply = "We would love to take your order! 🍽️ What delicious dishes from our royal menu would you like to have today?";
       } else if (incomingText.toLowerCase().includes("menu")) {
