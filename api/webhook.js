@@ -16,12 +16,14 @@ if (SUPABASE_URL && SUPABASE_SECRET_KEY) {
     supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
       auth: { persistSession: false, autoRefreshToken: false }
     });
-  } catch (err) {}
+  } catch (err) {
+    console.error("Supabase init error:", err);
+  }
 }
 
 async function sendWhatsApp(to, text) {
   const url = `https://graph.facebook.com/${GRAPH_VERSION}/${WHATSAPP_PHONE_ID}/messages`;
-  await fetch(url, {
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
@@ -34,49 +36,63 @@ async function sendWhatsApp(to, text) {
       text: { body: text }
     })
   });
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error(`Meta WhatsApp send failed (${res.status}):`, errText);
+  }
 }
 
-// Official Interactions API for gemini-3.8-flash
+// Resilient Google Gemini Brain using official Interactions & REST standards
 async function askGemini(prompt) {
-  // 1. Try official Interactions endpoint
-  const interactionsUrl = `https://generativelanguage.googleapis.com/v1beta/interactions?key=${GEMINI_API_KEY}`;
-  
+  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
+
+  // 1. Interactions API with standard authentication headers
   try {
-    const res = await fetch(interactionsUrl, {
+    const interactionsRes = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+      },
       body: JSON.stringify({
         model: GEMINI_MODEL,
         input: prompt
       })
     });
 
-    if (res.ok) {
-      const data = await res.json();
+    if (interactionsRes.ok) {
+      const data = await interactionsRes.json();
       const output = data.output_text || data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (output) return output.trim();
     }
-  } catch (e) {
-    console.warn("Interactions API call error:", e.message);
+  } catch (err) {
+    console.warn("Interactions API attempt failed:", err.message);
   }
 
-  // 2. Fallback to standard generateContent if interactions isn't provisioned yet
-  const standardUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-  const stdRes = await fetch(standardUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    })
-  });
+  // 2. Fallback to generateContent with x-goog-api-key header
+  const genRes = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
+      })
+    }
+  );
 
-  if (!stdRes.ok) {
-    const err = await stdRes.text();
-    throw new Error(`Gemini failed ${stdRes.status}: ${err}`);
+  if (!genRes.ok) {
+    const errBody = await genRes.text();
+    throw new Error(`Google API failed (${genRes.status}): ${errBody}`);
   }
 
-  const stdData = await stdRes.json();
-  return stdData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+  const genData = await genRes.json();
+  const text = genData?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("No text returned by Gemini");
+  return text.trim();
 }
 
 async function getMenu() {
@@ -86,7 +102,7 @@ async function getMenu() {
       .from("menu_items")
       .select("name, category, price, is_veg")
       .eq("is_available", true);
-    if (!data) return "";
+    if (!data || data.length === 0) return "";
     return data
       .map((i) => `- ${i.name} (${i.category}): ₹${i.price} [${i.is_veg ? "Veg" : "Non-Veg"}]`)
       .join("\n");
@@ -114,26 +130,34 @@ export default async function handler(req, res) {
 
     const menu = await getMenu();
 
-    const prompt = `You are the authentic dining concierge for Ilhaam Royal Dining, Kolkata (+91 74499 88873).
-Menu:
+    const prompt = `You are the authentic AI dining concierge for Ilhaam Royal Dining, 2A Congress Exhibition Road, Park Circus, Kolkata (+91 74499 88873).
+
+LIVE MENU:
 ${menu}
 
-Restaurant details:
-- Fine dining. Strictly NO hookah and NO alcohol.
-- Reshmi Kebab, Chicken Tikka, Chilli Chicken are boneless.
+RESTAURANT RULES & FACTS:
+- Upscale family fine dining.
+- Hookah and Alcohol are strictly prohibited and never served.
+- Reshmi Kebab, Chicken Tikka, and Chilli Chicken are 100% boneless.
 - Kolkata Biryanis & Drums of Heaven are bone-in.
-- Fish dish: Crispy Fish Fingers (₹370).
+- Fish dish available: Crispy Fish Fingers (₹370).
+- Mutton kebabs are chef tasting specials and not on the regular daily menu.
 
-Customer message: "${incomingText}"
+CUSTOMER MESSAGE:
+"${incomingText}"
 
-Rules:
-1. Answer the customer naturally, conversationally, and helpfully.
-2. If customer says "I would like to place an order" or "I want to order", ask them what dishes and quantities they would like. Do NOT confirm an order yet.
-3. Only when the customer clearly names items and quantities, calculate the total from the menu and ask them to confirm.
-4. Only when customer explicitly confirms (YES, CONFIRM), append at the end:
-ORDER_DATA:{"items":"summary of items","total":number,"type":"takeaway"}
-5. For table bookings, ask guests, date, and time. When all provided, append:
-RESERVATION_DATA:{"party_size":number,"time":"time"}
+INSTRUCTIONS:
+1. Reason and converse completely naturally like a professional dining concierge.
+2. If customer asks questions about menu, prices, spices, boneless/bone-in, answer accurately based on the facts above.
+3. If customer expresses intent to order dishes (e.g. "I would like to take fish fingers"):
+   - Identify the item and calculate total price from the menu.
+   - Summarize the items and total price clearly.
+   - Ask them: "Shall I confirm this order for you? (Reply YES to confirm)"
+4. DO NOT finalize the order until customer explicitly confirms with YES / CONFIRM.
+5. Once the customer explicitly confirms (YES, CONFIRM), append at the very end of your response:
+   ORDER_DATA:{"items":"item summary","total":calculated_number,"type":"takeaway"}
+6. If customer wants to reserve a table, ask for party size, date, and preferred time. When all provided, append:
+   RESERVATION_DATA:{"party_size":number,"time":"time"}
 
 Response:`;
 
@@ -141,23 +165,19 @@ Response:`;
     try {
       reply = await askGemini(prompt);
     } catch (e) {
-      console.error("AI Error:", e);
-      if (incomingText.toLowerCase().includes("order")) {
-        reply = "We would love to take your order! 🍽️ What delicious dishes from our royal menu would you like to have today?";
-      } else if (incomingText.toLowerCase().includes("menu")) {
-        reply = "Here is our full menu link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view 🍽️✨ What can we prepare for you?";
-      } else {
-        reply = "Warm greetings from Ilhaam Royal Dining! 🍽️✨ How may we assist you today? You can ask about our menu, place an order, or reserve a table.";
-      }
+      console.error("AI Generation Error:", e);
+      reply = "I apologize, our dining concierge is taking a quick moment to check the kitchen. Please message once again or call us directly at +91 74499 88873.";
     }
 
-    // Process database writes ONLY if real ORDER_DATA exists
+    // Process Orders into Supabase
     if (reply.includes("ORDER_DATA:")) {
       const parts = reply.split("ORDER_DATA:");
       reply = parts[0].trim();
       let payload = { total: 0, type: "takeaway" };
-      try { payload = JSON.parse(parts[1].trim()); } catch (err) {}
-      
+      try {
+        payload = JSON.parse(parts[1].trim());
+      } catch (err) {}
+
       const orderNumber = `ORD-${Date.now().toString().slice(-6)}`;
       if (supabase && payload.total > 0) {
         await supabase.from("orders").insert({
@@ -168,10 +188,11 @@ Response:`;
           payment_status: "pending",
           order_type: payload.type || "takeaway"
         });
-        reply += `\n\n✅ *Order Ticket Created:* *${orderNumber}*\nYour order has been recorded! Our team will contact you shortly.`;
+        reply += `\n\n✅ *Order Ticket Created:* *${orderNumber}*\nYour order has been sent to our counter team!`;
       }
     }
 
+    // Process Reservations into Supabase
     if (reply.includes("RESERVATION_DATA:")) {
       const parts = reply.split("RESERVATION_DATA:");
       reply = parts[0].trim();
@@ -181,7 +202,7 @@ Response:`;
     await sendWhatsApp(fromPhone, reply);
     return res.status(200).send("EVENT_RECEIVED");
   } catch (err) {
-    console.error("Handler error:", err);
+    console.error("Webhook handler fatal error:", err);
     return res.status(200).send("EVENT_RECEIVED");
   }
 }
