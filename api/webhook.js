@@ -18,7 +18,7 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 const GRAPH_VERSION = "v26.0";
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-2.0-flash";
 
 let supabase = null;
 
@@ -281,11 +281,12 @@ Phone: ${phone}
 Latest message: "${incomingText}"
 
 INSTRUCTIONS:
-1. Answer naturally and helpfully.
-2. If customer wants to order: calculate the total from the menu, summarize the items and prices, and ask: "You've selected [Items] for a total of ₹[Total]. Shall I confirm this order? Reply YES to confirm."
-3. When the customer confirms with YES, CONFIRM, etc., append at the very end:
+1. Answer naturally, warmly, and helpfully.
+2. If customer asks what fish or veg options exist, list them directly from the menu above with their prices.
+3. If customer wants to order: calculate the total from the menu, summarize the items and prices, and ask: "You've selected [Items] for a total of ₹[Total]. Shall I confirm this order? Reply YES to confirm."
+4. When the customer confirms with YES, CONFIRM, etc., append at the very end:
 ORDER_DATA:{"total":480,"type":"takeaway"}
-4. When customer wants table reservation: ask party size & time. When provided, append:
+5. When customer wants table reservation: ask party size & time. When provided, append:
 RESERVATION_DATA:{"party_size":2,"time":"8:00 PM"}
 `;
 }
@@ -390,7 +391,6 @@ WEBHOOK HANDLER
 */
 
 export default async function handler(req, res) {
-  // GET = Verification
   if (req.method === "GET") {
     if (req.query?.health === "1") {
       return res.status(200).json({
