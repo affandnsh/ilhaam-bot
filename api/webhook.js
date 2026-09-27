@@ -11,7 +11,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GRAPH_VERSION = "v26.0";
 const GEMINI_MODEL = "gemini-3.8-flash";
 
-// Official SDK Client
+// Official Google GenAI Client
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 let supabase = null;
@@ -46,38 +46,65 @@ async function sendWhatsApp(to, text) {
   }
 }
 
+// Resilient AI Engine matching official Google Interactions API standard
 async function askGemini(prompt) {
   if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
 
-  // 1. Primary: Use the official SDK Interactions/generate method
+  // Method 1: Official Interactions API via SDK
   try {
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: prompt
-    });
-    const output = response.text;
-    if (output) return output.trim();
+    if (ai.interactions && typeof ai.interactions.create === "function") {
+      const interaction = await ai.interactions.create({
+        model: GEMINI_MODEL,
+        input: prompt
+      });
+      const output = interaction.output_text;
+      if (output) return output.trim();
+    }
   } catch (err) {
-    console.warn("Primary SDK call failed, trying direct endpoint:", err.message);
+    console.warn("SDK interactions call failed, trying direct endpoint:", err.message);
   }
 
-  // 2. Fallback: Direct endpoint with API key parameter
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    })
-  });
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`API failed (${res.status}): ${errBody}`);
+  // Method 2: Direct REST Interactions API endpoint
+  try {
+    const res = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+      },
+      body: JSON.stringify({
+        model: GEMINI_MODEL,
+        input: prompt
+      })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const output = data.output_text || data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (output) return output.trim();
+    }
+  } catch (err) {
+    console.warn("Direct REST interactions call failed:", err.message);
   }
 
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  // Method 3: Standard generateContent with model
+  const genRes = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
+      })
+    }
+  );
+
+  if (!genRes.ok) {
+    const errBody = await genRes.text();
+    throw new Error(`Google API failed (${genRes.status}): ${errBody}`);
+  }
+
+  const genData = await genRes.json();
+  const text = genData?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("No text returned by Gemini");
   return text.trim();
 }
@@ -119,10 +146,10 @@ export default async function handler(req, res) {
 
     const prompt = `You are the authentic AI dining concierge for Ilhaam Royal Dining, 2A Congress Exhibition Road, Park Circus, Kolkata (+91 74499 88873).
 
-LIVE MENU:
+LIVE MENU FROM DATABASE:
 ${menu}
 
-RESTAURANT RULES & FACTS:
+FACTS & GUIDELINES:
 - Upscale family fine dining.
 - Hookah and Alcohol are strictly prohibited and never served.
 - Reshmi Kebab, Chicken Tikka, and Chilli Chicken are 100% boneless.
@@ -134,7 +161,7 @@ CUSTOMER MESSAGE:
 "${incomingText}"
 
 INSTRUCTIONS:
-1. Reason and converse completely naturally like a professional dining concierge.
+1. Reason and converse completely naturally like a warm, professional human dining concierge.
 2. If customer asks questions about menu, prices, spices, boneless/bone-in, answer accurately based on the facts above.
 3. If customer expresses intent to order dishes (e.g. "I would like to take fish fingers"):
    - Identify the item and calculate total price from the menu.
@@ -153,7 +180,7 @@ Response:`;
       reply = await askGemini(prompt);
     } catch (e) {
       console.error("AI Generation Error:", e);
-      reply = "Warm greetings from Ilhaam Royal Dining! 🍽️✨ How may we assist your dining experience today? You can ask about our menu, dietary preferences, or place an order.";
+      reply = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You can ask about our menu, dietary preferences, or place an order.";
     }
 
     // Process Orders into Supabase
