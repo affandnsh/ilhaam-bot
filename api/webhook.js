@@ -1,14 +1,9 @@
-import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SECRET_KEY
 );
-
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY
-});
 
 export default async function handler(req, res) {
   // 1. Meta Webhook Verification Handshake
@@ -92,7 +87,7 @@ export default async function handler(req, res) {
       }
 
       // Master AI Prompt
-      const systemPrompt = `You are the authentic, highly intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
+      const fullPrompt = `You are the authentic, highly intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
 Full Menu Drive Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
 
 OFFICIAL MENU RETRIEVED FROM DATABASE:
@@ -114,36 +109,31 @@ WORKFLOW:
    - For takeaway/delivery: append at the very end:
      ORDER_DATA:{"table":"takeaway","type":"takeaway","total":690}
 4. When customer wants table reservation: ask party size & time. When provided, append:
-   RESERVATION_DATA:{"party_size":2,"time":"8:00 PM"}`;
+   RESERVATION_DATA:{"party_size":2,"time":"8:00 PM"}
+
+Customer Phone: ${fromPhone}
+Customer says: "${incomingText}"
+
+Response:`;
 
       let replyText = "";
 
-      // Native SDK Call via @google/genai
+      // Bulletproof Gemini REST Call
       try {
-        const response = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: incomingText,
-          config: {
-            systemInstruction: { parts: [{ text: systemPrompt }] },
-            temperature: 0.3
+        const geminiRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ role: "user", parts: [{ text: fullPrompt }] }]
+            })
           }
-        });
-        replyText = response.text?.trim() || "";
+        );
+        const geminiData = await geminiRes.json();
+        replyText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
       } catch (gemErr) {
-        console.error("Gemini SDK Primary Error:", gemErr);
-        try {
-          const fallbackRes = await ai.models.generateContent({
-            model: "gemini-2.0-flash",
-            contents: incomingText,
-            config: {
-              systemInstruction: { parts: [{ text: systemPrompt }] },
-              temperature: 0.3
-            }
-          });
-          replyText = fallbackRes.text?.trim() || "";
-        } catch (fbErr) {
-          console.error("Gemini SDK Fallback Error:", fbErr);
-        }
+        console.error("Gemini API Error:", gemErr);
       }
 
       if (!replyText) {
