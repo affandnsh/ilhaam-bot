@@ -92,7 +92,7 @@ export default async function handler(req, res) {
       }
 
       // Master AI Prompt
-      const systemInstruction = `You are the authentic, highly intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
+      const systemPrompt = `You are the authentic, highly intelligent AI Concierge for "Ilhaam Royal Dining", 2A Congress Exhibition Road, Park Circus, Kolkata (+91 744 998 8873).
 Full Menu Drive Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view
 
 OFFICIAL MENU RETRIEVED FROM DATABASE:
@@ -124,20 +124,19 @@ WORKFLOW:
           model: "gemini-2.5-flash",
           contents: incomingText,
           config: {
-            systemInstruction: systemInstruction,
+            systemInstruction: { parts: [{ text: systemPrompt }] },
             temperature: 0.3
           }
         });
         replyText = response.text?.trim() || "";
       } catch (gemErr) {
         console.error("Gemini SDK Primary Error:", gemErr);
-        // Fallback to gemini-2.0-flash if needed
         try {
           const fallbackRes = await ai.models.generateContent({
             model: "gemini-2.0-flash",
             contents: incomingText,
             config: {
-              systemInstruction: systemInstruction,
+              systemInstruction: { parts: [{ text: systemPrompt }] },
               temperature: 0.3
             }
           });
