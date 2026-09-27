@@ -17,9 +17,9 @@ if (SUPABASE_URL && SUPABASE_SECRET_KEY) {
       {
         auth: {
           persistSession: false,
-          autoRefreshToken: false
-        }
-      }
+          autoRefreshToken: false,
+        },
+      },
     );
   } catch (err) {
     console.error("Supabase init error:", err);
@@ -35,14 +35,14 @@ async function sendWhatsApp(to, text) {
     method: "POST",
     headers: {
       Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
       messaging_product: "whatsapp",
       to,
       type: "text",
-      text: { body: text }
-    })
+      text: { body: text },
+    }),
   });
   if (!res.ok) {
     const body = await res.text();
@@ -50,26 +50,45 @@ async function sendWhatsApp(to, text) {
   }
 }
 
-// Resilient direct call using active models
-async function askGemini(prompt) {
+
+async function fetchWithTimeout(url, options, timeoutMs) {  // fix portion
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+
+async function askGemini(prompt) {   // fix portion
   if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
 
-  const models = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
+  const models = [
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+  ];
 
   for (const model of models) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.3,
-            maxOutputTokens: 800
-          }
-        })
-      });
+      const res = await fetchWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.3,
+              maxOutputTokens: 800,
+            },
+          }),
+        },
+        12000,
+      );
 
       if (res.ok) {
         const data = await res.json();
@@ -83,7 +102,10 @@ async function askGemini(prompt) {
         console.warn(`Model ${model} returned ${res.status}:`, errText);
       }
     } catch (e) {
-      console.warn(`Model ${model} request error:`, e.message);
+      console.warn(
+        `Model ${model} request error:`,
+        e.name === "AbortError" ? "timed out" : e.message,
+      );
     }
   }
 
@@ -101,7 +123,10 @@ async function getMenu() {
     if (error || !data?.length) return "";
 
     return data
-      .map((item) => `- ${item.name} (${item.category}): ₹${item.price} [${item.is_veg ? "Veg" : "Non-Veg"}]`)
+      .map(
+        (item) =>
+          `- ${item.name} (${item.category}): ₹${item.price} [${item.is_veg ? "Veg" : "Non-Veg"}]`,
+      )
       .join("\n");
   } catch (err) {
     console.error("getMenu error:", err);
@@ -110,7 +135,10 @@ async function getMenu() {
 }
 
 function cleanModelMarkers(reply) {
-  return reply.replace(/```(?:json)?/gi, "").replace(/```/g, "").trim();
+  return reply
+    .replace(/```(?:json)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
 }
 
 function extractMarker(reply, marker) {
@@ -134,16 +162,19 @@ export default async function handler(req, res) {
 
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
+
+  res.status(200).send("EVENT_RECEIVED");   // fix poretion
+
   try {
     const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!message || message.type !== "text") {
-      return res.status(200).send("EVENT_RECEIVED");
+      return;
     }
 
     const fromPhone = String(message.from || "").replace(/\D/g, "");
     const incomingText = message.text?.body?.trim() || "";
     if (!fromPhone || !incomingText) {
-      return res.status(200).send("EVENT_RECEIVED");
+      return;
     }
 
     const menu = await getMenu();
@@ -190,12 +221,13 @@ Response:`;
       reply = await askGemini(prompt);
     } catch (err) {
       console.error("AI Generation Error:", err);
-      reply = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You can ask about our menu, dietary options, or place an order.";
+      reply =
+        "Welcome to *Ilhaam Royal Dining*! How may we assist your dining experience today? You can ask about our menu, dietary options, or place an order.";
     }
 
     reply = cleanModelMarkers(reply);
 
-    // Process Orders into Supabase
+    // Process Orders
     const orderMarker = extractMarker(reply, "ORDER_DATA:");
     if (orderMarker) {
       reply = orderMarker.before;
@@ -212,13 +244,13 @@ Response:`;
             subtotal: total,
             status: "new",
             payment_status: "pending",
-            order_type: payload.type || "takeaway"
+            order_type: payload.type || "takeaway",
           });
 
           if (error) {
             console.error("Order insert error:", error);
           } else {
-            reply += `\n\n✅ *Order Ticket Created:* *${orderNumber}*\nYour order has been recorded! Our counter team will prepare it for you.`;
+            reply += `\n\n *Order Ticket Created:* *${orderNumber}*\nYour order has been recorded! Our counter team will prepare it for you.`;
           }
         }
       } catch (err) {
@@ -226,7 +258,6 @@ Response:`;
       }
     }
 
-    // Process Reservations into Supabase
     const reservationMarker = extractMarker(reply, "RESERVATION_DATA:");
     if (reservationMarker) {
       reply = reservationMarker.before;
@@ -236,19 +267,17 @@ Response:`;
           await supabase.from("reservations").insert({
             party_size: Number(payload.party_size),
             booking_time: payload.time || "Evening",
-            status: "pending"
+            status: "pending",
           });
         }
-        reply += `\n\n✅ *Table Request Logged!*\nOur team will contact you shortly to confirm your booking.`;
+        reply += `\n\n *Table Request Logged!*\nOur team will contact you shortly to confirm your booking.`;
       } catch (err) {
         console.error("Invalid RESERVATION_DATA:", err);
       }
     }
 
     await sendWhatsApp(fromPhone, reply.trim());
-    return res.status(200).send("EVENT_RECEIVED");
   } catch (err) {
     console.error("Webhook handler fatal error:", err);
-    return res.status(200).send("EVENT_RECEIVED");
   }
 }

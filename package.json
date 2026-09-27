@@ -4,6 +4,8 @@
   "type": "module",
   "dependencies": {
     "@google/genai": "latest",
-    "@supabase/supabase-js": "^2.45.4"
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^18.0.4",
+    "express": "^5.2.1"
   }
 }
