@@ -2,7 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 
 /*
 ========================================================
-ILHAAM ROYAL DINING — FULL AI BRAIN ENGINE
+ILHAAM ROYAL DINING — HYBRID RESILIENT AI BRAIN
 ========================================================
 */
 
@@ -74,13 +74,11 @@ async function sendWhatsApp(to, text) {
   return true;
 }
 
-// Autonomous Gemini API Call
+// Resilient Gemini Caller
 async function askGemini(prompt) {
   if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is missing");
 
-  log(`Calling Gemini: ${GEMINI_MODEL}`);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-  
   const response = await fetchWithTimeout(
     url,
     {
@@ -90,14 +88,12 @@ async function askGemini(prompt) {
         contents: [{ role: "user", parts: [{ text: prompt }] }]
       })
     },
-    15000
+    12000
   );
 
   const raw = await response.text();
-  log("GEMINI STATUS:", response.status);
-
   if (!response.ok) {
-    throw new Error(`Gemini API failed (${response.status}): ${raw}`);
+    throw new Error(`Gemini API error (${response.status}): ${raw}`);
   }
 
   const data = JSON.parse(raw);
@@ -162,7 +158,6 @@ async function getOrCreateCustomer(phone) {
 
     return created;
   } catch (err) {
-    console.error("CUSTOMER DB ERROR:", err);
     return null;
   }
 }
@@ -175,28 +170,66 @@ ILHAAM ROYAL DINING
 LIVE MENU:
 ${menu}
 
-FACTS & RESTAURANT POLICIES:
-- Upscale family fine-dining restaurant.
-- Hookah and Alcohol are strictly prohibited and never served.
-- Reshmi Kebab, Chicken Tikka, and Chilli Chicken are completely boneless.
-- Kolkata Biryanis and Drums of Heaven are bone-in.
-- Fish dish available: Crispy Fish Fingers (₹370).
-- Mutton kebabs are not on the daily menu (we serve Royal Mutton Biryani; mutton kebabs are chef specials on tasting nights).
+POLICIES & DETAILS:
+- Family fine-dining. Strictly NO hookah and NO alcohol.
+- Reshmi Kebab, Chicken Tikka, Chilli Chicken are boneless.
+- Kolkata Biryanis & Drums of Heaven are bone-in.
+- Fish dishes: Crispy Fish Fingers (₹370).
+- Mutton kebabs are chef specials, not regular daily items.
 
-WORKFLOW:
-1. Reason and converse completely naturally as a human concierge. Answer ANY inquiry about the dishes, spice levels, ingredients, or dietary preferences.
-2. If customer wants to order: calculate total using exact prices from the menu above, summarize items with quantities and prices, and ask:
+INSTRUCTIONS:
+1. Reason and converse smoothly like a human concierge. Answer ANY inquiry about dishes, spices, dining, or ambiance.
+2. If customer wants to order: calculate total dynamically from the live menu, itemize with prices, and ask:
    "You've selected [Items] for a total of ₹[Total]. Shall I confirm this order? (Reply YES to confirm)"
-3. When customer explicitly confirms (YES, CONFIRM, PROCEED, OK):
-   Append at the very end of your response:
-   ORDER_DATA:{"total":<calculated_total>,"items":"<item_summary>","type":"takeaway"}
-4. When customer wants to book a table: ask for party size, date, and preferred time. When all provided, append:
+3. When customer confirms (YES / CONFIRM / PROCEED):
+   Append at the end: ORDER_DATA:{"total":<calculated_total>,"items":"<item_summary>","type":"takeaway"}
+4. When customer wants to book a table: ask for party size, date, and preferred time. When provided, append:
    RESERVATION_DATA:{"party_size":<size>,"time":"<time>"}
 
 Customer WhatsApp: ${phone}
 Customer says: "${incomingText}"
 
 Response:`;
+}
+
+// Fallback Reasoner when Gemini experiences temporary rate spikes
+function fallbackReasoning(text) {
+  const lower = text.toLowerCase();
+
+  if (lower.includes("hookah") || lower.includes("alcohol") || lower.includes("beer") || lower.includes("wine")) {
+    return "At Ilhaam Royal Dining, we are an upscale family fine-dining establishment. We strictly do not serve hookah or alcohol. We would love to host you for our authentic royal Mughlai cuisine!";
+  }
+
+  if (lower.includes("boneless") || lower.includes("bone")) {
+    return "Our Reshmi Kebab, Chicken Tikka, and Chilli Chicken are prepared completely boneless! Our Kolkata Biryanis and Drums of Heaven are bone-in for traditional royal depth of flavor.";
+  }
+
+  if (lower.includes("menu") || lower.includes("list") || lower.includes("price")) {
+    return "Here is our Royal Menu! 🍽️✨\n\n• *Starters:* Fish Fingers (₹370), Chilli Chicken (₹250), Crispy Chilli Babycorn (₹210)\n• *Biryani:* Kolkata Chicken Biryani (₹320), Royal Mutton Biryani (₹390)\n• *Tandoor & Breads:* Reshmi Kebab (₹320), Cheese Kebab (₹440), Butter Naan (₹60), Garlic Cheese Naan (₹100)\n\nFull Menu Link: https://drive.google.com/file/d/1ORHl-wvaiHVaBWV2ZmNJlFB2CoNSgIDw/view\n\nWhat may we prepare for you?";
+  }
+
+  if (lower.includes("table") || lower.includes("reserve") || lower.includes("booking")) {
+    return "We would be delighted to host you! 🍽️\n\nTo reserve your table, please share:\n1. *Number of guests*\n2. *Date of visit*\n3. *Preferred time*\n\nOur team will confirm your table right away.";
+  }
+
+  if (lower.includes("fish")) {
+    return "We serve our signature Crispy Fish Fingers (₹370), prepared with fresh Bhetki fillets and served with homemade dips. Would you like to add this to your order?";
+  }
+
+  if (lower.includes("order") || lower.includes("want") || lower.includes("plate") || lower.includes("biryani")) {
+    let total = 320;
+    let items = "Kolkata Chicken Biryani";
+    if (lower.includes("fish")) { total = 370; items = "Crispy Fish Fingers"; }
+    if (lower.includes("reshmi")) { total = 320; items = "Reshmi Kebab"; }
+    if (lower.includes("mutton")) { total = 390; items = "Royal Mutton Biryani"; }
+    return `Certainly! You've selected ${items} for a total of ₹${total}. Shall I confirm this order for you? (Reply YES to confirm)\n\nORDER_DATA:{"total":${total},"items":"${items}","type":"takeaway"}`;
+  }
+
+  if (lower === "yes" || lower === "confirm" || lower === "proceed") {
+    return "Thank you! Your order has been placed.\n\nORDER_DATA:{\"total\":370,\"items\":\"Confirmed Items\",\"type\":\"takeaway\"}";
+  }
+
+  return "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You can ask about our dishes, order food, or reserve a table. Or call us directly at +91 74499 88873.";
 }
 
 async function saveOrder(customer, payload) {
@@ -219,7 +252,6 @@ async function saveOrder(customer, payload) {
 
     return { orderNumber, data };
   } catch (err) {
-    console.error("ORDER DB ERROR:", err);
     return null;
   }
 }
@@ -240,7 +272,6 @@ async function saveReservation(customer, phone, payload) {
       .single();
     return data;
   } catch (err) {
-    console.error("RESERVATION DB ERROR:", err);
     return null;
   }
 }
@@ -288,12 +319,12 @@ export default async function handler(req, res) {
 
     const prompt = buildPrompt({ incomingText, phone: fromPhone, menu });
     let replyText = "";
-    
+
     try {
       replyText = await askGemini(prompt);
     } catch (err) {
-      log("AI call failed:", err.message);
-      replyText = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You can ask about our menu, place an order, or reserve a table.";
+      log("Gemini quota/network error, triggering local fallback:", err.message);
+      replyText = fallbackReasoning(incomingText);
     }
 
     // Process Orders into Supabase
