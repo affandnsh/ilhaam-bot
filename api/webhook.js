@@ -28,7 +28,7 @@ if (SUPABASE_URL && SUPABASE_SECRET_KEY) {
 
 async function sendWhatsApp(to, text) {
   if (!WHATSAPP_PHONE_ID || !WHATSAPP_ACCESS_TOKEN) {
-    throw new Error("WhatsApp environment variables are missing");
+    throw new Error("WhatsApp environment variables missing");
   }
   const url = `https://graph.facebook.com/${GRAPH_VERSION}/${WHATSAPP_PHONE_ID}/messages`;
   const res = await fetch(url, {
@@ -50,72 +50,44 @@ async function sendWhatsApp(to, text) {
   }
 }
 
-// In-memory cache so we only query the model list once per container lifecycle
-let cachedModel = null;
-
-async function getGeminiModel() {
-  if (cachedModel) return cachedModel;
-  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
-
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(GEMINI_API_KEY)}`
-  );
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(`Gemini model-list API ${res.status}: ${data?.error?.message || JSON.stringify(data)}`);
-  }
-
-  const models = (data.models || [])
-    .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes("generateContent"))
-    .map((m) => m.name)
-    .filter(Boolean);
-
-  if (!models.length) {
-    throw new Error("No Gemini model supporting generateContent is available for this API key");
-  }
-
-  // Pick Flash models first
-  const preferred = models.find((name) => /flash/i.test(name) && !/embedding|image|tts|live|audio/i.test(name));
-  const selected = preferred || models[0];
-
-  cachedModel = selected.startsWith("models/") ? selected.slice("models/".length) : selected;
-  console.log("Active Gemini model selected:", cachedModel);
-  return cachedModel;
-}
-
+// Resilient direct call using active models
 async function askGemini(prompt) {
   if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
 
-  const modelName = await getGeminiModel();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  const models = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.3,
-        maxOutputTokens: 800
+  for (const model of models) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: 800
+          }
+        })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const text = (data?.candidates?.[0]?.content?.parts || [])
+          .map((part) => part?.text || "")
+          .join("")
+          .trim();
+        if (text) return text;
+      } else {
+        const errText = await res.text();
+        console.warn(`Model ${model} returned ${res.status}:`, errText);
       }
-    })
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    console.error("Gemini API error:", JSON.stringify(data, null, 2));
-    throw new Error(`Gemini API ${res.status}: ${data?.error?.message || JSON.stringify(data)}`);
+    } catch (e) {
+      console.warn(`Model ${model} request error:`, e.message);
+    }
   }
 
-  const text = (data?.candidates?.[0]?.content?.parts || [])
-    .map((part) => part?.text || "")
-    .join("")
-    .trim();
-
-  if (!text) {
-    throw new Error("Gemini returned no text");
-  }
-  return text;
+  throw new Error("All model endpoints failed");
 }
 
 async function getMenu() {
@@ -218,7 +190,7 @@ Response:`;
       reply = await askGemini(prompt);
     } catch (err) {
       console.error("AI Generation Error:", err);
-      reply = "Sorry, our dining assistant is temporarily unavailable. Please try again in a moment or call +91 74499 88873.";
+      reply = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You can ask about our menu, dietary options, or place an order.";
     }
 
     reply = cleanModelMarkers(reply);
