@@ -1,14 +1,22 @@
-// Local-only dev server. Runs api/webhook.js without needing a Vercel
-// account, login, or project link. Not used in production.
-import "dotenv/config";
+// Runs api/webhook.js as a normal always-on server (local, Render, Railway...).
+// Not used by Vercel.
+import dotenv from "dotenv";
 import express from "express";
-import handler from "./api/webhook.js";
+
+// Load .env.local first (local dev), then .env. On Render/Railway the
+// platform provides real env vars, so missing files are simply ignored.
+dotenv.config({ path: ".env.local" });
+dotenv.config();
+
+// webhook.js reads process.env when it is first imported, so import it
+// AFTER dotenv has loaded (static imports would run before dotenv.config).
+const { default: handler } = await import("./api/webhook.js");
 
 const app = express();
 app.use(express.json());
 
-// Vercel passes req/res objects with .status().send() etc. Express's
-// req/res already support that shape, so we can call the handler directly.
+app.get("/", (req, res) => res.status(200).send("Ilhaam bot is running"));
+
 app.all("/api/webhook", (req, res) => {
   handler(req, res).catch((err) => {
     console.error("Unhandled error in handler:", err);
@@ -18,7 +26,5 @@ app.all("/api/webhook", (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(
-    `Local webhook server running at http://localhost:${PORT}/api/webhook`,
-  );
+  console.log(`Server running on port ${PORT} -> /api/webhook`);
 });
