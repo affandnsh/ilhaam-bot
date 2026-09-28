@@ -6,7 +6,13 @@ const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GRAPH_VERSION = "v26.0";
+const GRAPH_VERSION = "v20.0";
+
+// Updated with valid production Gemini model names
+const MODELS = ["gemini-1.5-flash", "gemini-1.5-pro"];
+const HISTORY_LIMIT = 12;
+const HISTORY_WINDOW_MS = 6 * 60 * 60 * 1000;
+const WHATSAPP_MAX_CHARS = 4000;
 
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_SECRET_KEY) {
@@ -14,76 +20,143 @@ if (SUPABASE_URL && SUPABASE_SECRET_KEY) {
     supabase = createClient(
       SUPABASE_URL.replace(/\/rest\/v1\/?$/, ""),
       SUPABASE_SECRET_KEY,
-      {
-        auth: {
-          persistSession: false,
-          autoRefreshToken: false
-        }
-      }
+      { auth: { persistSession: false, autoRefreshToken: false } },
     );
   } catch (err) {
     console.error("Supabase init error:", err);
   }
 }
 
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const seenMessageIds = new Set();
+function alreadySeen(id) {
+  if (!id) return false;
+  if (seenMessageIds.has(id)) return true;
+  seenMessageIds.add(id);
+  if (seenMessageIds.size > 500) {
+    seenMessageIds.delete(seenMessageIds.values().next().value);
+  }
+  return false;
+}
+
+function waUrl() {
+  return `https://graph.facebook.com/${GRAPH_VERSION}/${WHATSAPP_PHONE_ID}/messages`;
+}
+
 async function sendWhatsApp(to, text) {
   if (!WHATSAPP_PHONE_ID || !WHATSAPP_ACCESS_TOKEN) {
     throw new Error("WhatsApp environment variables missing");
   }
-  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${WHATSAPP_PHONE_ID}/messages`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-      "Content-Type": "application/json"
+  const res = await fetchWithTimeout(
+    waUrl(),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to,
+        type: "text",
+        text: { body: text },
+      }),
     },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body: text }
-    })
-  });
+    15000,
+  );
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`WhatsApp API ${res.status}: ${body}`);
   }
 }
 
-async function askGemini(prompt) {
-  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
-
-  const models = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
-
-  for (const model of models) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-      const res = await fetch(url, {
+async function markReadAndTyping(messageId) {
+  if (!messageId || !WHATSAPP_PHONE_ID || !WHATSAPP_ACCESS_TOKEN) return;
+  try {
+    await fetchWithTimeout(
+      waUrl(),
+      {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.3,
-            maxOutputTokens: 800
-          }
-        })
-      });
+          messaging_product: "whatsapp",
+          status: "read",
+          message_id: messageId,
+          typing_indicator: { type: "text" },
+        }),
+      },
+      5000,
+    );
+  } catch (e) {}
+}
 
-      if (res.ok) {
-        const data = await res.json();
-        const text = (data?.candidates?.[0]?.content?.parts || [])
-          .map((part) => part?.text || "")
-          .join("")
-          .trim();
-        if (text) return text;
-      }
-    } catch (e) {
-      console.warn(`Model ${model} request error:`, e.message);
+const memoryHistory = new Map();
+async function loadHistory(phone) {
+  const cutoff = Date.now() - HISTORY_WINDOW_MS;
+
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("chat_messages")
+        .select("role, content")
+        .eq("phone", phone)
+        .gte("created_at", new Date(cutoff).toISOString())
+        .order("created_at", { ascending: false })
+        .limit(HISTORY_LIMIT);
+      if (!error && data) return data.reverse();
+      if (error)
+        console.warn("chat_messages unavailable, using memory:", error.message);
+    } catch (err) {
+      console.warn("loadHistory error:", err.message);
     }
   }
 
-  throw new Error("All model endpoints failed");
+  return (memoryHistory.get(phone) || [])
+    .filter((m) => m.ts >= cutoff)
+    .slice(-HISTORY_LIMIT)
+    .map(({ role, content }) => ({ role, content }));
+}
+
+async function saveTurn(phone, userText, assistantText) {
+  const now = Date.now();
+  const mem = memoryHistory.get(phone) || [];
+  mem.push({ role: "user", content: userText, ts: now });
+  mem.push({ role: "assistant", content: assistantText, ts: now + 1 });
+  memoryHistory.set(phone, mem.slice(-HISTORY_LIMIT * 2));
+
+  if (!supabase) return;
+  try {
+    const { error } = await supabase.from("chat_messages").insert([
+      {
+        phone,
+        role: "user",
+        content: userText,
+        created_at: new Date(now).toISOString(),
+      },
+      {
+        phone,
+        role: "assistant",
+        content: assistantText,
+        created_at: new Date(now + 1).toISOString(),
+      },
+    ]);
+    if (error)
+      console.warn("saveTurn skipped (table missing?):", error.message);
+  } catch (err) {
+    console.warn("saveTurn error:", err.message);
+  }
 }
 
 async function getMenu() {
@@ -97,7 +170,10 @@ async function getMenu() {
     if (error || !data?.length) return "";
 
     return data
-      .map((item) => `- ${item.name} (${item.category}): ₹${item.price} [${item.is_veg ? "Veg" : "Non-Veg"}]`)
+      .map(
+        (item) =>
+          `- ${item.name} (${item.category}): ₹${item.price} [${item.is_veg ? "Veg" : "Non-Veg"}]`,
+      )
       .join("\n");
   } catch (err) {
     console.error("getMenu error:", err);
@@ -105,8 +181,121 @@ async function getMenu() {
   }
 }
 
-function cleanModelMarkers(reply) {
-  return reply.replace(/```(?:json)?/gi, "").replace(/```/g, "").trim();
+function buildSystemPrompt(menu) {
+  const now = new Date().toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+  return `You are "Ilhaam Concierge", the friendly AI dining assistant of Ilhaam Royal Dining, chatting with guests on WhatsApp.
+
+CURRENT DATE/TIME (India): ${now}
+
+RESTAURANT
+Ilhaam Royal Dining, 2A Congress Exhibition Road, Park Circus, Kolkata
+Phone: +91 74499 88873
+
+LIVE MENU (only source of dishes and prices):
+${menu || "(Menu database is currently unavailable. Do not invent menu items or prices; offer to have the team call back.)"}
+
+FACTS
+- Upscale family fine dining.
+- Hookah and alcohol are strictly prohibited and never served.
+- Reshmi Kebab, Chicken Tikka and Chilli Chicken are 100% boneless.
+- Kolkata Biryanis and Drums of Heaven are bone-in.
+- Crispy Fish Fingers are available for ₹370.
+- Mutton kebabs are chef tasting specials and are not on the regular daily menu.
+
+HOW TO CHAT
+- Sound like a warm, natural human concierge, not a form. Short messages, 1-3 short paragraphs. Use emojis sparingly (0-2).
+- Reply in the guest's language and style (English, Hindi, Bengali, or Hinglish).
+- Remember the whole conversation. Never ask again for something the guest already told you.
+- Greetings: greet warmly and offer 2-3 helpful things (menu, order, table).
+- If asked for the menu, show it grouped by category with prices, compactly. Do not use Markdown tables.
+- Recommend dishes when asked (popular, veg/non-veg, boneless, spice level), only from the menu.
+- WhatsApp formatting only: *bold* with single asterisks, _italic_ with underscores. Never use ** or # headings.
+- Never invent dishes, prices, offers or policies. If unsure, say the team will confirm and share the phone number.
+
+ORDERS
+- When the guest wants to order, list the items with quantity and price, give the total (calculated from the menu), and ask them to reply YES to confirm.
+- Only after the guest clearly confirms (YES / confirm / haan / okay place it), write a short confirmation and append this on the very last line, nothing after it:
+ORDER_DATA:{"items":"ITEM SUMMARY","total":NUMBER,"type":"takeaway"}
+- If they say YES but there is no pending order in the conversation, ask what they'd like to order. Never output ORDER_DATA in any other situation.
+
+RESERVATIONS
+- To book a table you need party size, date and time. Ask only for what is missing.
+- Once you have all three, confirm them back in one friendly line and append this on the very last line, nothing after it:
+RESERVATION_DATA:{"party_size":NUMBER,"date":"YYYY-MM-DD","time":"HH:MM AM/PM"}
+- Never output RESERVATION_DATA until all three details are known.`;
+}
+
+async function askGemini(systemPrompt, history, userText) {
+  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
+
+  let turns = history.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }],
+  }));
+  while (turns.length && turns[0].role !== "user") turns.shift();
+  turns.push({ role: "user", parts: [{ text: userText }] });
+
+  for (const model of MODELS) {
+    try {
+      const res = await fetchWithTimeout(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: turns,
+            generationConfig: {
+              temperature: 0.6,
+              maxOutputTokens: 2048,
+            },
+          }),
+        },
+        8000, // lowered timeout per model to prevent Vercel 10s function limits
+      );
+
+      if (res.ok) {
+        const data = await res.json();
+        const text = (data?.candidates?.[0]?.content?.parts || [])
+          .map((part) => part?.text || "")
+          .join("")
+          .trim();
+        if (text) return text;
+      } else {
+        console.warn(
+          `Model ${model} returned ${res.status}:`,
+          await res.text(),
+        );
+      }
+    } catch (e) {
+      console.warn(
+        `Model ${model} request error:`,
+        e.name === "AbortError" ? "timed out" : e.message,
+      );
+    }
+  }
+
+  throw new Error("All model endpoints failed");
+}
+
+function cleanReply(reply) {
+  return reply
+    .replace(/```(?:json)?/gi, "")
+    .replace(/```/g, "")
+    .replace(/\*\*(.+?)\*\*/g, "*$1*")
+    .replace(/^#{1,6}\s+/gm, "")
+    .trim();
 }
 
 function extractMarker(reply, marker) {
@@ -114,7 +303,121 @@ function extractMarker(reply, marker) {
   if (index === -1) return null;
   const before = reply.slice(0, index).trim();
   const after = reply.slice(index + marker.length).trim();
-  return { before, after };
+  const start = after.indexOf("{");
+  const end = after.lastIndexOf("}");
+  const json =
+    start !== -1 && end > start ? after.slice(start, end + 1) : after;
+  return { before, json };
+}
+
+async function insertWithFallback(table, full, minimal) {
+  let { error } = await supabase.from(table).insert(full);
+  if (error) {
+    console.warn(
+      `${table} full insert failed (${error.message}); retrying minimal`,
+    );
+    ({ error } = await supabase.from(table).insert(minimal));
+  }
+  return error;
+}
+
+async function processMessage(message) {
+  const fromPhone = String(message.from || "").replace(/\D/g, "");
+  if (!fromPhone) return;
+
+  if (message.type !== "text") {
+    await sendWhatsApp(
+      fromPhone,
+      "Thanks for your message! 😊 I can read text messages only, so please type your question and I'll be glad to help.",
+    );
+    return;
+  }
+
+  const incomingText = message.text?.body?.trim() || "";
+  if (!incomingText) return;
+
+  markReadAndTyping(message.id);
+
+  const [menu, history] = await Promise.all([
+    getMenu(),
+    loadHistory(fromPhone),
+  ]);
+
+  let reply;
+  let aiOk = true;
+  try {
+    reply = await askGemini(buildSystemPrompt(menu), history, incomingText);
+  } catch (err) {
+    aiOk = false;
+    console.error("AI Generation Error:", err);
+    reply =
+      "Sorry, our dining assistant is having trouble right now. Please try again in a moment or call us at +91 74499 88873.";
+  }
+
+  reply = cleanReply(reply);
+
+  const orderMarker = extractMarker(reply, "ORDER_DATA:");
+  if (orderMarker) {
+    reply = orderMarker.before;
+    try {
+      const payload = JSON.parse(orderMarker.json);
+      const total = Number(payload.total);
+      const items = String(payload.items || "").trim();
+
+      if (supabase && Number.isFinite(total) && total > 0 && items) {
+        const orderNumber = `ORD-${Date.now().toString().slice(-6)}`;
+        const minimal = {
+          order_number: orderNumber,
+          total,
+          subtotal: total,
+          status: "new",
+          payment_status: "pending",
+          order_type: payload.type || "takeaway",
+        };
+        const error = await insertWithFallback(
+          "orders",
+          { ...minimal, customer_phone: fromPhone, notes: items },
+          minimal,
+        );
+        if (error) {
+          console.error("Order insert error:", error);
+        } else {
+          reply += `\n\n *Order confirmed:* *${orderNumber}*\nOur counter team will start preparing it for you.`;
+        }
+      }
+    } catch (err) {
+      console.error("Invalid ORDER_DATA:", err);
+    }
+  }
+
+  const reservationMarker = extractMarker(reply, "RESERVATION_DATA:");
+  if (reservationMarker) {
+    reply = reservationMarker.before;
+    try {
+      const payload = JSON.parse(reservationMarker.json);
+      if (supabase) {
+        const minimal = {
+          party_size: Number(payload.party_size),
+          booking_time: payload.time || "Evening",
+          status: "pending",
+        };
+        const error = await insertWithFallback(
+          "reservations",
+          { ...minimal, booking_date: payload.date, customer_phone: fromPhone },
+          minimal,
+        );
+        if (error) console.error("Reservation insert error:", error);
+      }
+      reply += `\n\n *Table request logged!*\nOur team will contact you shortly to confirm your booking.`;
+    } catch (err) {
+      console.error("Invalid RESERVATION_DATA:", err);
+    }
+  }
+
+  reply = reply.trim().slice(0, WHATSAPP_MAX_CHARS);
+  await sendWhatsApp(fromPhone, reply);
+
+  if (aiOk) await saveTurn(fromPhone, incomingText, reply);
 }
 
 export default async function handler(req, res) {
@@ -130,119 +433,16 @@ export default async function handler(req, res) {
 
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
-  try {
-    const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (!message || message.type !== "text") {
-      return res.status(200).send("EVENT_RECEIVED");
-    }
-
-    const fromPhone = String(message.from || "").replace(/\D/g, "");
-    const incomingText = message.text?.body?.trim() || "";
-    if (!fromPhone || !incomingText) {
-      return res.status(200).send("EVENT_RECEIVED");
-    }
-
-    const menu = await getMenu();
-    const prompt = `You are the authentic AI dining concierge for Ilhaam Royal Dining.
-RESTAURANT:
-Ilhaam Royal Dining
-2A Congress Exhibition Road, Park Circus, Kolkata
-Phone: +91 74499 88873
-
-LIVE MENU FROM DATABASE:
-${menu || "(Menu database is currently unavailable. Do not invent menu items or prices.)"}
-
-RESTAURANT FACTS:
-- Upscale family fine dining.
-- Hookah and alcohol are strictly prohibited and never served.
-- Reshmi Kebab, Chicken Tikka, and Chilli Chicken are 100% boneless.
-- Kolkata Biryanis and Drums of Heaven are bone-in.
-- Crispy Fish Fingers are available for ₹370.
-- Mutton kebabs are chef tasting specials and are not on the regular daily menu.
-
-CUSTOMER MESSAGE:
-"${incomingText}"
-
-RULES:
-1. Reply naturally, warmly and briefly like a professional WhatsApp dining concierge.
-2. Answer menu, price, spice, vegetarian, boneless/bone-in and restaurant questions using only the supplied menu and facts.
-3. Never invent a price or menu item.
-4. If the customer wants to order, identify the requested menu item(s), calculate the total from the supplied menu, show a clear summary, and ask:
-   "Shall I confirm this order for you? Reply YES to confirm."
-5. Do NOT create ORDER_DATA until the customer explicitly says YES or CONFIRM.
-6. If the customer says YES/CONFIRM but there is no clearly established pending order in the current message/context, ask what they would like to order instead of inventing an order.
-7. If the customer wants a table reservation, ask for any missing party size, date, and preferred time.
-8. Only when all reservation details are present, append exactly:
-   RESERVATION_DATA:{"party_size":NUMBER,"date":"DATE","time":"TIME"}
-9. Only after explicit order confirmation, append exactly:
-   ORDER_DATA:{"items":"ITEM SUMMARY","total":NUMBER,"type":"takeaway"}
-10. Put the marker on the final line and do not put anything after it.
-11. Do not use Markdown tables.
-
-Response:`;
-
-    let reply;
-    try {
-      reply = await askGemini(prompt);
-    } catch (err) {
-      console.error("AI Generation Error:", err);
-      reply = "Welcome to *Ilhaam Royal Dining*! 🍽️✨ How may we assist your dining experience today? You can ask about our menu, dietary options, or place an order.";
-    }
-
-    reply = cleanModelMarkers(reply);
-
-    // Process Orders into Supabase
-    const orderMarker = extractMarker(reply, "ORDER_DATA:");
-    if (orderMarker) {
-      reply = orderMarker.before;
-      try {
-        const payload = JSON.parse(orderMarker.after);
-        const total = Number(payload.total);
-        const items = String(payload.items || "").trim();
-
-        if (supabase && Number.isFinite(total) && total > 0 && items) {
-          const orderNumber = `ORD-${Date.now().toString().slice(-6)}`;
-          const { error } = await supabase.from("orders").insert({
-            order_number: orderNumber,
-            total,
-            subtotal: total,
-            status: "new",
-            payment_status: "pending",
-            order_type: payload.type || "takeaway"
-          });
-
-          if (!error) {
-            reply += `\n\n✅ *Order Ticket Created:* *${orderNumber}*\nYour order has been recorded! Our counter team will prepare it for you.`;
-          }
-        }
-      } catch (err) {
-        console.error("Invalid ORDER_DATA:", err);
-      }
-    }
-
-    // Process Reservations into Supabase
-    const reservationMarker = extractMarker(reply, "RESERVATION_DATA:");
-    if (reservationMarker) {
-      reply = reservationMarker.before;
-      try {
-        const payload = JSON.parse(reservationMarker.after);
-        if (supabase) {
-          await supabase.from("reservations").insert({
-            party_size: Number(payload.party_size),
-            booking_time: payload.time || "Evening",
-            status: "pending"
-          });
-        }
-        reply += `\n\n✅ *Table Request Logged!*\nOur team will contact you shortly to confirm your booking.`;
-      } catch (err) {
-        console.error("Invalid RESERVATION_DATA:", err);
-      }
-    }
-
-    await sendWhatsApp(fromPhone, reply.trim());
-    return res.status(200).send("EVENT_RECEIVED");
-  } catch (err) {
-    console.error("Webhook handler fatal error:", err);
+  const message = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+  if (!message || alreadySeen(message.id)) {
     return res.status(200).send("EVENT_RECEIVED");
   }
+
+  try {
+    await processMessage(message);
+  } catch (err) {
+    console.error("Webhook handler fatal error:", err);
+  }
+
+  return res.status(200).send("EVENT_RECEIVED");
 }
