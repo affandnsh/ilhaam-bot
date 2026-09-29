@@ -9,7 +9,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GRAPH_VERSION = "v20.0";
 
 // Updated with valid production Gemini model names
-const MODELS = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"];
+const MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite"];
 const HISTORY_LIMIT = 12;
 const HISTORY_WINDOW_MS = 6 * 60 * 60 * 1000;
 const WHATSAPP_MAX_CHARS = 4000;
