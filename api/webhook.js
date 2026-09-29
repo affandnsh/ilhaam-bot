@@ -244,45 +244,50 @@ async function askGemini(systemPrompt, history, userText) {
   while (turns.length && turns[0].role !== "user") turns.shift();
   turns.push({ role: "user", parts: [{ text: userText }] });
 
-  for (const model of MODELS) {
-    try {
-      const res = await fetchWithTimeout(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: systemPrompt }] },
-            contents: turns,
-            generationConfig: {
-              temperature: 0.6,
-              maxOutputTokens: 2048,
-            },
-          }),
-        },
-        8000, // lowered timeout per model to prevent Vercel 10s function limits
-      );
+  // Use primary 3.8 models with auto-retry on 503 spikes
+  const candidateModels = ["gemini-3.8-flash", "gemini-2.5-pro"];
 
-      if (res.ok) {
-        const data = await res.json();
-        const text = (data?.candidates?.[0]?.content?.parts || [])
-          .map((part) => part?.text || "")
-          .join("")
-          .trim();
-        if (text) return text;
-      } else {
-        console.warn(
-          `Model ${model} returned ${res.status}:`,
-          await res.text(),
+  for (const model of candidateModels) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetchWithTimeout(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: systemPrompt }] },
+              contents: turns,
+              generationConfig: {
+                temperature: 0.5,
+                maxOutputTokens: 1024,
+              },
+            }),
+          },
+          8000
         );
+
+        if (res.ok) {
+          const data = await res.json();
+          const text = (data?.candidates?.[0]?.content?.parts || [])
+            .map((part) => part?.text || "")
+            .join("")
+            .trim();
+          if (text) return text;
+        }
+
+        const errText = await res.text();
+        console.warn(`Model ${model} attempt ${attempt + 1} returned ${res.status}:`, errText);
+
+        // If Google returns 503 (demand spike), wait 800ms and retry once
+        if (res.status === 503 && attempt === 0) {
+          await new Promise((r) => setTimeout(r, 800));
+          continue;
+        }
+      } catch (e) {
+        console.warn(`Model ${model} request error:`, e.message);
       }
-    } catch (e) {
-      console.warn(
-        `Model ${model} request error:`,
-        e.name === "AbortError" ? "timed out" : e.message,
-      );
+      break;
     }
   }
 
