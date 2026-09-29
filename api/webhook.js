@@ -250,8 +250,7 @@ async function askGemini(systemPrompt, history, userText) {
   for (const model of candidateModels) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await fetchWithTimeout(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`
+        const res = await fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`, {method: "POST",
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
