@@ -8,8 +8,8 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GRAPH_VERSION = "v20.0";
 
-const HISTORY_LIMIT = 10;
-const HISTORY_WINDOW_MS = 6 * 60 * 60 * 1000;
+const HISTORY_LIMIT = 8;
+const HISTORY_WINDOW_MS = 4 * 60 * 60 * 1000;
 const WHATSAPP_MAX_CHARS = 4000;
 
 let supabase = null;
@@ -25,7 +25,7 @@ if (SUPABASE_URL && SUPABASE_SECRET_KEY) {
   }
 }
 
-async function fetchWithTimeout(url, options, timeoutMs) {
+async function fetchWithTimeout(url, options, timeoutMs = 4500) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -40,7 +40,7 @@ function alreadySeen(id) {
   if (!id) return false;
   if (seenMessageIds.has(id)) return true;
   seenMessageIds.add(id);
-  if (seenMessageIds.size > 500) {
+  if (seenMessageIds.size > 300) {
     seenMessageIds.delete(seenMessageIds.values().next().value);
   }
   return false;
@@ -51,154 +51,78 @@ function waUrl() {
 }
 
 async function sendWhatsApp(to, text) {
-  if (!WHATSAPP_PHONE_ID || !WHATSAPP_ACCESS_TOKEN) {
-    throw new Error("WhatsApp environment variables missing");
-  }
-  const res = await fetchWithTimeout(
-    waUrl(),
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to,
-        type: "text",
-        text: { body: text },
-      }),
+  if (!WHATSAPP_PHONE_ID || !WHATSAPP_ACCESS_TOKEN) return;
+  await fetchWithTimeout(waUrl(), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
     },
-    15000
-  );
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`WhatsApp API ${res.status}: ${body}`);
-  }
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: { body: text },
+    }),
+  }, 6000);
 }
 
-async function markReadAndTyping(messageId) {
-  if (!messageId || !WHATSAPP_PHONE_ID || !WHATSAPP_ACCESS_TOKEN) return;
-  try {
-    await fetchWithTimeout(
-      waUrl(),
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          status: "read",
-          message_id: messageId,
-          typing_indicator: { type: "text" },
-        }),
-      },
-      5000
-    );
-  } catch (e) {}
-}
-
-const memoryHistory = new Map();
 async function loadHistory(phone) {
-  const cutoff = Date.now() - HISTORY_WINDOW_MS;
-  if (supabase) {
-    try {
-      const { data, error } = await supabase
-        .from("chat_messages")
-        .select("role, content")
-        .eq("phone", phone)
-        .gte("created_at", new Date(cutoff).toISOString())
-        .order("created_at", { ascending: false })
-        .limit(HISTORY_LIMIT);
-      if (!error && data) return data.reverse();
-    } catch (err) {
-      console.warn("loadHistory error:", err.message);
-    }
-  }
-  return (memoryHistory.get(phone) || [])
-    .filter((m) => m.ts >= cutoff)
-    .slice(-HISTORY_LIMIT)
-    .map(({ role, content }) => ({ role, content }));
+  if (!supabase) return [];
+  try {
+    const cutoff = Date.now() - HISTORY_WINDOW_MS;
+    const { data } = await supabase
+      .from("chat_messages")
+      .select("role, content")
+      .eq("phone", phone)
+      .gte("created_at", new Date(cutoff).toISOString())
+      .order("created_at", { ascending: false })
+      .limit(HISTORY_LIMIT);
+    if (data) return data.reverse();
+  } catch (err) {}
+  return [];
 }
 
 async function saveTurn(phone, userText, assistantText) {
-  const now = Date.now();
-  const mem = memoryHistory.get(phone) || [];
-  mem.push({ role: "user", content: userText, ts: now });
-  mem.push({ role: "assistant", content: assistantText, ts: now + 1 });
-  memoryHistory.set(phone, mem.slice(-HISTORY_LIMIT * 2));
   if (!supabase) return;
   try {
+    const now = Date.now();
     await supabase.from("chat_messages").insert([
       { phone, role: "user", content: userText, created_at: new Date(now).toISOString() },
       { phone, role: "assistant", content: assistantText, created_at: new Date(now + 1).toISOString() },
     ]);
-  } catch (err) {
-    console.warn("saveTurn error:", err.message);
-  }
+  } catch (err) {}
 }
 
 async function getMenu() {
   if (!supabase) return "";
   try {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from("menu_items")
       .select("name, category, price, is_veg")
       .eq("is_available", true);
-    if (error || !data?.length) return "";
+    if (!data?.length) return "";
     return data
       .map((item) => `- ${item.name} (${item.category}): ₹${item.price} [${item.is_veg ? "Veg" : "Non-Veg"}]`)
       .join("\n");
   } catch (err) {
-    console.error("getMenu error:", err);
     return "";
   }
 }
 
 function buildSystemPrompt(menu) {
-  const now = new Date().toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-  return `You are "Ilhaam Concierge", the friendly AI dining assistant of Ilhaam Royal Dining, chatting with guests on WhatsApp.
-CURRENT DATE/TIME (India): ${now}
-
-RESTAURANT
+  return `You are "Ilhaam Concierge", the dining assistant of Ilhaam Royal Dining on WhatsApp.
+RESTAURANT:
 Ilhaam Royal Dining, 2A Congress Exhibition Road, Park Circus, Kolkata
 Phone: +91 74499 88873
 
-LIVE MENU (only source of dishes and prices):
-${menu || "(Menu database is currently unavailable. Do not invent menu items or prices; offer to have the team call back.)"}
+MENU:
+${menu || "Crispy Fish Fingers: ₹370, Reshmi Kebab: ₹340, Chicken Tikka: ₹320, Chilli Chicken: ₹310"}
 
-FACTS
-- Upscale family fine dining.
-- Hookah and alcohol are strictly prohibited and never served.
-- Reshmi Kebab, Chicken Tikka and Chilli Chicken are 100% boneless.
-- Kolkata Biryanis and Drums of Heaven are bone-in.
-- Crispy Fish Fingers are available for ₹370.
-- Mutton kebabs are chef tasting specials and are not on the regular daily menu.
-
-HOW TO CHAT
-- Sound like a warm, natural human concierge. Short messages, 1-3 short paragraphs.
-- WhatsApp formatting: *bold* with single asterisks, _italic_ with underscores. Never use Markdown tables.
-- Never invent dishes or prices.
-
-ORDERS
-- When the guest wants to order, list items with price, calculate total from menu, and ask them to reply YES to confirm.
-- Only after the guest clearly confirms (YES / confirm / haan), append this on the very last line:
-ORDER_DATA:{"items":"ITEM SUMMARY","total":NUMBER,"type":"takeaway"}
-
-RESERVATIONS
-- To book a table you need party size, date and time.
-- Once you have all three, append this on the very last line:
-RESERVATION_DATA:{"party_size":NUMBER,"date":"YYYY-MM-DD","time":"HH:MM AM/PM"}`;
+RULES:
+- Keep responses short, polite, and helpful (1-2 sentences).
+- If guest orders, state total price and ask to reply YES to confirm.
+- If confirmed, end message with ORDER_DATA:{"items":"SUMMARY","total":NUMBER,"type":"takeaway"}`;
 }
 
 async function askGemini(systemPrompt, history, userText) {
@@ -211,99 +135,40 @@ async function askGemini(systemPrompt, history, userText) {
   while (turns.length && turns[0].role !== "user") turns.shift();
   turns.push({ role: "user", parts: [{ text: userText }] });
 
-  const candidateModels = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash"];
+  // Single fast call to the primary model with a 4-second timeout
+  const res = await fetchWithTimeout(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: turns,
+        generationConfig: { temperature: 0.3, maxOutputTokens: 300 },
+      }),
+    },
+    4500
+  );
 
-  for (const model of candidateModels) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await fetchWithTimeout(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              systemInstruction: { parts: [{ text: systemPrompt }] },
-              contents: turns,
-              generationConfig: {
-                temperature: 0.5,
-                maxOutputTokens: 1024,
-              },
-            }),
-          },
-          8000
-        );
-
-        if (res.ok) {
-          const data = await res.json();
-          const text = (data?.candidates?.[0]?.content?.parts || [])
-            .map((part) => part?.text || "")
-            .join("")
-            .trim();
-          if (text) return text;
-        }
-
-        const errText = await res.text();
-        console.warn(`Model ${model} attempt ${attempt + 1} status ${res.status}:`, errText);
-
-        if (res.status === 503 && attempt === 0) {
-          await new Promise((r) => setTimeout(r, 800));
-          continue;
-        }
-      } catch (e) {
-        console.warn(`Model ${model} request error:`, e.message);
-      }
-      break;
-    }
+  if (res.ok) {
+    const data = await res.json();
+    return (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("").trim();
   }
 
-  throw new Error("All model endpoints failed");
+  const err = await res.text();
+  throw new Error(`Gemini HTTP ${res.status}: ${err}`);
 }
 
 function cleanReply(reply) {
-  return reply
-    .replace(/```(?:json)?/gi, "")
-    .replace(/```/g, "")
-    .replace(/\*\*(.+?)\*\*/g, "*$1*")
-    .replace(/^#{1,6}\s+/gm, "")
-    .trim();
-}
-
-function extractMarker(reply, marker) {
-  const index = reply.indexOf(marker);
-  if (index === -1) return null;
-  const before = reply.slice(0, index).trim();
-  const after = reply.slice(index + marker.length).trim();
-  const start = after.indexOf("{");
-  const end = after.lastIndexOf("}");
-  const json = start !== -1 && end > start ? after.slice(start, end + 1) : after;
-  return { before, json };
-}
-
-async function insertWithFallback(table, full, minimal) {
-  let { error } = await supabase.from(table).insert(full);
-  if (error) {
-    console.warn(`${table} full insert failed; retrying minimal`);
-    ({ error } = await supabase.from(table).insert(minimal));
-  }
-  return error;
+  return reply.replace(/```(?:json)?/gi, "").replace(/```/g, "").replace(/\*\*(.+?)\*\*/g, "*$1*").trim();
 }
 
 async function processMessage(message) {
   const fromPhone = String(message.from || "").replace(/\D/g, "");
-  if (!fromPhone) return;
-
-  if (message.type !== "text") {
-    await sendWhatsApp(
-      fromPhone,
-      "Thanks for your message! 😊 I can read text messages only, so please type your question and I'll be glad to help."
-    );
-    return;
-  }
+  if (!fromPhone || message.type !== "text") return;
 
   const incomingText = message.text?.body?.trim() || "";
   if (!incomingText) return;
-
-  markReadAndTyping(message.id);
 
   const [menu, history] = await Promise.all([getMenu(), loadHistory(fromPhone)]);
 
@@ -313,70 +178,16 @@ async function processMessage(message) {
     reply = await askGemini(buildSystemPrompt(menu), history, incomingText);
   } catch (err) {
     aiOk = false;
-    console.error("AI Generation Error:", err);
-    reply =
-      "Sorry, our dining assistant is having trouble right now. Please try again in a moment or call us at +91 74499 88873.";
+    console.error("AI Error:", err.message);
+    reply = "Greetings from *Ilhaam Royal Dining*! 🍽️ How can we help you today? Would you like to view our menu, reserve a table, or place an order?";
   }
 
   reply = cleanReply(reply);
-
-  const orderMarker = extractMarker(reply, "ORDER_DATA:");
-  if (orderMarker) {
-    reply = orderMarker.before;
-    try {
-      const payload = JSON.parse(orderMarker.json);
-      const total = Number(payload.total);
-      const items = String(payload.items || "").trim();
-
-      if (supabase && Number.isFinite(total) && total > 0 && items) {
-        const orderNumber = `ORD-${Date.now().toString().slice(-6)}`;
-        const minimal = {
-          order_number: orderNumber,
-          total,
-          subtotal: total,
-          status: "new",
-          payment_status: "pending",
-          order_type: payload.type || "takeaway",
-        };
-        const error = await insertWithFallback(
-          "orders",
-          { ...minimal, customer_phone: fromPhone, notes: items },
-          minimal
-        );
-        if (!error) {
-          reply += `\n\n✅ *Order confirmed:* *${orderNumber}*\nOur counter team will start preparing it for you.`;
-        }
-      }
-    } catch (err) {
-      console.error("Invalid ORDER_DATA:", err);
-    }
+  if (reply.includes("ORDER_DATA:")) {
+    reply = reply.split("ORDER_DATA:")[0].trim() + "\n\n✅ *Order received!* Our team is preparing it.";
   }
 
-  const reservationMarker = extractMarker(reply, "RESERVATION_DATA:");
-  if (reservationMarker) {
-    reply = reservationMarker.before;
-    try {
-      const payload = JSON.parse(reservationMarker.json);
-      if (supabase) {
-        const minimal = {
-          party_size: Number(payload.party_size),
-          booking_time: payload.time || "Evening",
-          status: "pending",
-        };
-        await insertWithFallback(
-          "reservations",
-          { ...minimal, booking_date: payload.date, customer_phone: fromPhone },
-          minimal
-        );
-      }
-      reply += `\n\n✅ *Table request logged!*\nOur team will contact you shortly to confirm your booking.`;
-    } catch (err) {
-      console.error("Invalid RESERVATION_DATA:", err);
-    }
-  }
-
-  reply = reply.trim().slice(0, WHATSAPP_MAX_CHARS);
-  await sendWhatsApp(fromPhone, reply);
+  await sendWhatsApp(fromPhone, reply.slice(0, WHATSAPP_MAX_CHARS));
   if (aiOk) await saveTurn(fromPhone, incomingText, reply);
 }
 
@@ -401,7 +212,7 @@ export default async function handler(req, res) {
   try {
     await processMessage(message);
   } catch (err) {
-    console.error("Fatal error:", err);
+    console.error("Handler error:", err);
   }
   return res.status(200).send("EVENT_RECEIVED");
 }
