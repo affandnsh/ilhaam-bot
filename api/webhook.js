@@ -245,7 +245,7 @@ async function askGemini(systemPrompt, history, userText) {
   turns.push({ role: "user", parts: [{ text: userText }] });
 
   // Use primary 3.8 models with auto-retry on 503 spikes
-  const candidateModels = ["gemini-3.8-flash", "gemini-2.5-pro"];
+const candidateModels = ["gemini-3.8-flash", "gemini-3.5-flash-lite"];
 
   for (const model of candidateModels) {
     for (let attempt = 0; attempt < 2; attempt++) {
