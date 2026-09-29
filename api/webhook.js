@@ -9,7 +9,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GRAPH_VERSION = "v20.0";
 
 // Updated with valid production Gemini model names
-const MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite"];
+const candidateModels = [ "gemini-3.1-pro", "gemini-3.5-flash-lite", "gemini-3.8-flash" ] ;
 const HISTORY_LIMIT = 12;
 const HISTORY_WINDOW_MS = 6 * 60 * 60 * 1000;
 const WHATSAPP_MAX_CHARS = 4000;
@@ -251,7 +251,7 @@ async function askGemini(systemPrompt, history, userText) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const res = await fetchWithTimeout(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
